@@ -167,6 +167,7 @@
               <th>Concepto</th>
               <th class="num">Monto</th>
               <th class="num">%</th>
+              <th>Tipo</th>
               <th class="num">Cant.</th>
             </tr>
           </thead>
@@ -267,6 +268,13 @@ function fmt(v, code) {
 
 function isCo() { return document.getElementById('fMeasure').value === 'co'; }
 function signed() { return document.getElementById('fNeg').checked; }
+function isInbound(r){ return r.ptype==='inbound'; }
+function isOutbound(r){ return r.ptype==='outbound'; }
+function isDiscountOrReturn(r){
+  const k=(r.reason||'').toString().toUpperCase();
+  return k.includes('DESCUENT')||k.includes('PROMO')||k.includes('DEVOL');
+}
+
 
 // Moneda en la que se esta midiendo ahora mismo.
 function curKey() {
@@ -286,9 +294,12 @@ function curKey() {
 function val(r) {
   const co = isCo();
   let v = co ? (r.amountCo === null ? 0 : r.amountCo) : r.amount;
+  // For inbound (income), treat discounts/returns as negative contribution in net view? 
+  // But keep display consistent with signed toggle
   if (!signed()) v = Math.abs(v);
   return v;
 }
+
 
 function money(v) { return fmt(v, curKey()); }
 function pct(v) { return (Number(v) || 0).toFixed(1) + '%'; }
@@ -389,7 +400,7 @@ function render() {
   state.total = total;
   state.count = rows.length;
 
-  const byReason = group(rows, r => r.reason).sort((a, b) => b.value - a.value);
+  const byReason = group(rows, r => r.reason).map(g=>({key:g.key,value:g.value,count:g.count,_flow:(function(){const ptf=document.getElementById("fPtype").value; if(ptf!=="all") return ptf==="inbound"?"Entrada":"Salida"; const co=isCo(); const sam=rows.filter(r=>r.reason===g.key); if(!sam.length)return""; const inb=sam.some(r=>isInbound(r)); const out=sam.some(r=>isOutbound(r)); if(inb&&!out)return"Entrada"; if(out&&!inb)return"Salida"; const v=co?(sam[0].amountCo??0):sam[0].amount; return v>=0?"Entrada":"Salida";})()})).sort((a,b)=>b.value-a.value);
   state.rows = decorate(byReason, 0, '', 0, total);
 
   renderChips(byReason, total);
@@ -423,18 +434,52 @@ function renderChips(byReason, total) {
 }
 
 function renderKpis(rows, byReason, total) {
-  const avg = rows.length ? total / rows.length : 0;
+  const pt = document.getElementById('fPtype').value;
+  const co = isCo();
+  let ingresosNet = 0, egresos = 0;
+  for (let i=0;i<rows.length;i++){
+    const r=rows[i];
+    const vbase = co ? (r.amountCo===null?0:r.amountCo) : r.amount;
+    const v = signed()? vbase : Math.abs(vbase);
+    if (isInbound(r)){
+      if (isDiscountOrReturn(r)) ingresosNet += -v;
+      else ingresosNet += v;
+    } else if (isOutbound(r)){
+      egresos += signed()? v : v; // outbound usually negative in co; show magnitude? keep consistent
+      // better: use value direction
+    }
+  }
+  // easier: recompute by signed logic
+  const avg = rows.length ? total/rows.length : 0;
   const top = byReason[0];
-  const card = (label, value, note) =>
-    '<div class="kpi"><span>' + label + '</span><b>' + value + '</b>' +
-    (note ? '<small>' + note + '</small>' : '') + '</div>';
-  document.getElementById('kpis').innerHTML =
-    card('Total analizado', money(total), rows.length + ' registros') +
-    card('Ticket promedio', money(avg), 'por pago') +
-    card('Categorias', byReason.length, 'en ' + M.reason_label) +
-    (top ? card('Mayor gasto', money(top.value),
-                top.key + ' · ' + pct(top.value / total * 100)) : '');
+  const card = (label,value,note)=> '<div class="kpi"><span>'+label+'</span><b>'+value+'</b>'+(note?'<small>'+note+'</small>':'')+'</div>';
+  let html = card('Total analizado', money(total), rows.length+' registros') +
+             card('Ticket promedio', money(avg), 'por pago') +
+             card('Categorias', byReason.length, 'en '+M.reason_label);
+  if (top) html += card('Mayor gasto', money(top.value), top.key+' � '+pct(top.value/total*100));
+  // add net when ambos
+  if (pt==='all'){
+    let ing=0, eg=0, bal=0;
+    for (let i=0;i<rows.length;i++){
+      const r=rows[i];
+      const v = co?(r.amountCo??0):r.amount;
+      if (isInbound(r)){
+        ing += isDiscountOrReturn(r) ? -Math.abs(v) : Math.abs(v);
+      } else if (isOutbound(r)){
+        eg += Math.abs(v); // gasto
+      }
+    }
+    bal = ing-eg;
+    html = card('Total Ingresos (Netos)', money(signed()?ing:Math.abs(ing)), 'Bruto - Descuentos - Devoluciones') +
+           card('Total Gastos/Egresos', money(signed()?-eg:eg), 'Salidas') +
+           card('Margen / Balance Neto', money(signed()?bal:Math.abs(bal)), bal>=0?'Superávit':'Déficit') +
+           card('Categorias', byReason.length, 'en '+M.reason_label) +
+           (byReason[0]?card('Principal', money(byReason[0].value), byReason[0].key):'');
+    // adjust 'Mayor gasto' label not to include income? when inbound shown separately, top might be income; but keep simple
+  }
+  document.getElementById('kpis').innerHTML = html;
 }
+
 
 const PALETTE = ['#213C83', '#dc2626', '#059669', '#d97706', '#7c3aed',
                  '#0891b2', '#db2777', '#65a30d', '#ea580c', '#4f46e5',
@@ -683,6 +728,7 @@ function renderTable(total) {
     if (n.level === 2) html += '<span class="lvl">Documento</span>';
     html += '<span>' + escapeHtml(n.label) + '</span></div></td>';
     html += '<td class="num">' + money(n.value) + '</td>';
+    html += '<td>'+escapeHtml(n._flow||'')+'</td>'
     html += '<td class="num">' + pct(n.pct) + '<div class="bar"><i style="width:' +
               Math.min(n.pct, 100) + '%"></i></div></td>';
     html += '<td class="num">' + n.count + '</td></tr>';
@@ -731,11 +777,11 @@ function setPreset(kind) {
 function exportCsv() {
   const rows = flatRows(state.rows);
   const enc = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
-  const cols = ['Nivel', 'Detalle', 'Monto', 'Moneda', '% Total', 'Cantidad'];
+  const cols = ['Nivel', 'Detalle', 'Monto', 'Moneda', 'Tipo', '% Total', 'Cantidad'];
   let csv = cols.join(',') + '\n';
   rows.forEach(n => {
     csv += [n.level + 1, enc(n.label), n.value.toFixed(2), enc(curKey()),
-            n.pct.toFixed(2), n.count].join(',') + '\n';
+            enc(n._flow||''), n.pct.toFixed(2), n.count].join(',') + '\n';
   });
   csv += ['', '"TOTAL"', state.total.toFixed(2), enc(curKey()),
           '100.00', state.count].join(',') + '\n';
