@@ -42,6 +42,8 @@ MEASURE_CANDIDATES = ["amount", "amount_total", "debit", "balance"]
 # Medida en MONEDA DE COMPANIA. En salidas viene negativa por convencion contable.
 CO_CANDIDATES = ["amount_company_currency_signed", "amount_total_signed", "amount_signed"]
 DATE_CANDIDATES = ["payment_date", "date", "invoice_date"]
+# Fecha usada por el favorito "inglb" de Pagos para agrupar ingresos de clientes.
+PUB_DATE_FIELD = os.environ.get("GASTOS_PUBDATE_FIELD", "x_fecha_de_publicacion")
 SIN_CLASIFICAR = "(Sin clasificar)"
 
 cj = http.cookiejar.CookieJar()
@@ -106,6 +108,11 @@ def detect_fields():
         "company_field": "company_id" if "company_id" in fg else False,
         "currency_field": "currency_id" if "currency_id" in fg else False,
         "co_currency_field": "company_currency_id" if "company_currency_id" in fg else False,
+        # Base de "pagos de clientes" (favorito inglb): se basa en el tipo de
+        # partner y en una fecha de publicacion propia, no en payment_type/date.
+        "pubdate_field": PUB_DATE_FIELD if PUB_DATE_FIELD in fg else False,
+        "partner_type_field": "partner_type" if "partner_type" in fg else False,
+        "internal_field": "is_internal_transfer" if "is_internal_transfer" in fg else False,
     }
 
 
@@ -165,7 +172,8 @@ def fetch_rows(cfg):
     fields = ["id"]
     for key in ("measure", "measure_co", "date_field", "state_field", "ptype_field",
                 "partner_field", "name_field", "company_field", "currency_field",
-                "co_currency_field"):
+                "co_currency_field", "pubdate_field", "partner_type_field",
+                "internal_field"):
         if cfg.get(key):
             fields.append(cfg[key])
     fields.append(cfg["reason_field"])
@@ -235,6 +243,13 @@ def build_payload():
         partner = pid[1] if isinstance(pid, (list, tuple)) and len(pid) > 1 else "(Sin proveedor)"
         dval = r.get(cfg["date_field"]) if cfg.get("date_field") else None
         dstr = str(dval) if dval else ""
+        pval = r.get(cfg["pubdate_field"]) if cfg.get("pubdate_field") else None
+        pstr = str(pval) if pval else ""
+        # Base clientes: partner_type = customer y no es transferencia interna.
+        ptype_partner = (r.get(cfg["partner_type_field"])
+                         if cfg.get("partner_type_field") else "") or ""
+        internal = bool(r.get(cfg["internal_field"])) if cfg.get("internal_field") else False
+        is_customer = (ptype_partner == "customer") and not internal
         cur = rel(r.get("currency_id")) or "(vacia)"
         co = rel(r.get("company_id")) or "(vacia)"
         co_cur = ""
@@ -252,6 +267,12 @@ def build_payload():
             "comp": co,
             "state": r.get(cfg["state_field"]) if cfg.get("state_field") else "",
             "ptype": r.get(cfg["ptype_field"]) if cfg.get("ptype_field") else "",
+            # --- base de ingresos de clientes (favorito inglb) ---
+            "pubdate": pstr,
+            "pubmonth": pstr[:7],
+            "partnerType": ptype_partner,
+            "internal": internal,
+            "isCustomer": is_customer,
         })
         cur_names.add(cur)
         companies.add(co)
@@ -283,6 +304,9 @@ def build_payload():
             "measure_co": cfg["measure_co"],
             "measure_co_label": "Monto en moneda de compania",
             "date_field": cfg["date_field"],
+            "pubdate_field": cfg["pubdate_field"] or "",
+            "partner_type_field": cfg["partner_type_field"] or "",
+            "internal_field": cfg["internal_field"] or "",
             "state_field": cfg["state_field"],
             "ptype_field": cfg["ptype_field"],
             "total_records": total,
@@ -410,6 +434,18 @@ HTML = r"""<!DOCTYPE html>
         <option value="outbound">Salidas (egresos)</option>
         <option value="inbound">Entradas (ingresos)</option>
         <option value="all">Ambos</option>
+      </select>
+    </div>
+    <div class="f"><label>Base</label>
+      <select id="fBase">
+        <option value="customer">Clientes (favorito inglb)</option>
+        <option value="flow">Flujo de pagos (payment_type)</option>
+      </select>
+    </div>
+    <div class="f"><label>Usar fecha</label>
+      <select id="fDate">
+        <option value="pub">Fecha de publicacion</option>
+        <option value="pay">Fecha del pago</option>
       </select>
     </div>
     <div class="f"><label>Medir en</label>
@@ -575,6 +611,15 @@ function fmt(v, code) {
 
 function isCo() { return document.getElementById('fMeasure').value === 'co'; }
 
+// Base de seleccion: clientes (como el favorito inglb de Pagos) o flujo de pagos.
+function baseCustomer() { return document.getElementById('fBase').value === 'customer'; }
+// Los ingresos de clientes se agrupan por fecha de publicacion, no por date.
+function usePubDate() { return document.getElementById('fDate').value === 'pub'; }
+
+// Fecha y mes que aplican a la fila segun el criterio elegido.
+function rowDate(r) { return usePubDate() ? (r.pubdate || '') : (r.date || ''); }
+function rowMonth(r) { return rowDate(r).slice(0, 7); }
+
 // Sentido del flujo de caja, para no mezclar ingresos con gastos.
 function isInbound(r) { return r.ptype === 'inbound'; }
 function isOutbound(r) { return r.ptype === 'outbound'; }
@@ -589,7 +634,24 @@ function flowOf(rows) {
   if (outb) return 'Salida';
   return 'Ajuste';
 }
+function reasonOf(r) { return String(r.reason || '').toUpperCase(); }
+// Ingreso por venta de mercancia.
+function isVenta(r) {
+  const k = reasonOf(r);
+  return k.indexOf('VENTA') !== -1;
+}
+// Anticipos y Adelantos de clientes.
+function isAnticipo(r) {
+  const k = reasonOf(r);
+  return k.indexOf('ANTICIPO') !== -1 || k.indexOf('ADELANTO') !== -1;
+}
+// Un ajuste solo descuenta cuando el pago es a un cliente: en el flujo de
+// pagos tambien existen ajustes de proveedores que no son descuentos de venta.
 function isDiscountOrReturn(r) {
+  if (baseCustomer() && !r.isCustomer) return false;
+  return isDiscountReason(r);
+}
+function isDiscountReason(r) {
   const k = String(r.reason || '').toUpperCase();
   return k.indexOf('DESCUENT') !== -1 || k.indexOf('DEVOL') !== -1 || k.indexOf('PROMO') !== -1;
 }
@@ -627,11 +689,21 @@ function filtered() {
   const pt = document.getElementById('fPtype').value;
   const cu = document.getElementById('fCur').value;
   const co = document.getElementById('fComp').value;
+  const cust = baseCustomer();
   return ROWS.filter(r => {
-    if (from && r.date && r.date < from) return false;
-    if (to && r.date && r.date > to) return false;
+    // En base clientes solo entran pagos de clientes que no son transferencias internas.
+    if (cust && !r.isCustomer) return false;
+    const d = rowDate(r);
+    // Con un rango activo, un pago sin fecha en el criterio elegido no puede
+    // evaluarse y queda fuera (si no, se colaria en todos los cortes).
+    if (from || to) {
+      if (!d) return false;
+      if (from && d < from) return false;
+      if (to && d > to) return false;
+    }
     if (st !== 'all' && r.state !== st) return false;
-    if (M.ptype_field && pt !== 'all' && r.ptype !== pt) return false;
+    // El tipo de flujo solo aplica a la base de flujo: en clientes manda partner_type.
+    if (!cust && M.ptype_field && pt !== 'all' && r.ptype !== pt) return false;
     if (!isCo() && cu && r.cur !== cu) return false;
     if (co && r.comp !== co) return false;
     if (activeReason !== null && r.reason !== activeReason) return false;
@@ -758,22 +830,30 @@ function renderChips(byReason, total) {
 // Desglose del lado del dinero: bruto, ajustes que restan y salidas.
 // Se calculan siempre sobre importes absolutos para que el signo no dependa
 // de como venga el dato en Odoo.
+// Componentes del ingreso, con el criterio del favorito "inglb":
+//   ventas + anticipos - descuentos/devoluciones = ingreso neto
+// El signo se fuerza con Math.abs porque en Odoo los descuentos llegan positivos.
 function breakdown(rows) {
   const co = isCo();
-  let bruto = 0, desc = 0, eg = 0, odooIn = 0;
+  const cust = baseCustomer();
+  let ventas = 0, anticipos = 0, desc = 0, eg = 0, otros = 0;
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const raw = co ? (r.amountCo === null ? 0 : r.amountCo) : r.amount;
-    if (isInbound(r)) {
-      odooIn += raw;
-      if (isDiscountOrReturn(r)) desc += Math.abs(raw);
-      else bruto += Math.abs(raw);
-    } else if (isOutbound(r)) {
-      eg += Math.abs(raw);
+    const v = Math.abs(raw);
+    const entra = cust ? true : isInbound(r);
+    if (entra) {
+      if (isDiscountOrReturn(r)) desc += v;
+      else if (isAnticipo(r)) anticipos += v;
+      else if (isVenta(r)) ventas += v;
+      else otros += v;
+    } else if (cust || isOutbound(r)) {
+      eg += v;
     }
   }
-  return { bruto: bruto, desc: desc, neto: bruto - desc, egresos: eg,
-           balance: (bruto - desc) - eg, odoo: odooIn };
+  const neto = ventas + anticipos - desc;
+  return { ventas: ventas, anticipos: anticipos, desc: desc, otros: otros,
+           neto: neto, egresos: eg, balance: neto - eg };
 }
 
 function renderKpis(rows, byReason, total) {
@@ -783,15 +863,17 @@ function renderKpis(rows, byReason, total) {
     (note ? '<small>' + note + '</small>' : '') + '</div>';
   let html = '';
 
-  if (pt === 'all') {
+  if (pt === 'all' || baseCustomer()) {
     const k = breakdown(rows);
     html =
-      card('Ingreso bruto', money(k.bruto), 'Entradas sin descuentos') +
+      card('Ingresos por ventas', money(k.ventas), 'Ventas a clientes') +
+      card('Anticipos de clientes', money(k.anticipos), 'Adelantos cobrados') +
       card('Descuentos y devoluciones', money(k.desc), 'Restan al ingreso') +
-      card('Total ingresos (netos)', money(k.neto), 'Bruto - descuentos') +
-      card('Total gastos / egresos', money(k.egresos), 'Salidas') +
-      card('Margen / balance', money(k.balance),
-           k.balance >= 0 ? 'Superávit' : 'Déficit') +
+      card('Ingreso neto', money(k.neto), 'Ventas + anticipos - descuentos') +
+      (k.otros ? card('Otros ingresos', money(k.otros), 'Sin clasificar') : '') +
+      (k.egresos ? card('Total gastos / egresos', money(k.egresos), 'Salidas') : '') +
+      (k.egresos ? card('Margen / balance', money(k.balance),
+                        k.balance >= 0 ? 'Superávit' : 'Déficit') : '') +
       card('Categorías', byReason.length, 'en ' + M.reason_label);
     document.getElementById('kpis').innerHTML = html;
     return;
@@ -799,7 +881,7 @@ function renderKpis(rows, byReason, total) {
 
   const avg = rows.length ? total / rows.length : 0;
   const top = byReason[0];
-  const esIngreso = pt === 'inbound';
+  const esIngreso = pt === 'inbound' && !baseCustomer();
   html =
     card('Total analizado', money(total), rows.length + ' registros') +
     card('Ticket promedio', money(avg), 'por pago') +
@@ -859,14 +941,14 @@ function renderHistory() {
   const keepSet = new Set(keep);
   const nRest = ranked.length - keep.length;
 
-  const usable = rows.filter(r => saneDate(r.date));
-  const buckets = Array.from(new Set(usable.map(r => bucketOf(r.date)))).sort();
+  const usable = rows.filter(r => saneDate(rowDate(r)));
+  const buckets = Array.from(new Set(usable.map(r => bucketOf(rowDate(r))))).sort();
 
   const acc = new Map();
   keep.forEach(k => acc.set(k, new Map()));
   let restMap = new Map();
   usable.forEach(r => {
-    const b = bucketOf(r.date);
+    const b = bucketOf(rowDate(r));
     const v = val(r);
     if (keepSet.has(r['reason'])) {
       const m = acc.get(r['reason']);
@@ -1094,7 +1176,7 @@ function escapeHtml(s) {
 }
 
 function setPreset(kind) {
-  const dates = ROWS.map(r => r.date).filter(Boolean).sort();
+  const dates = ROWS.map(r => rowDate(r)).filter(Boolean).sort();
   if (kind === 'all') {
     document.getElementById('fFrom').value = dates[0] || '';
     document.getElementById('fTo').value = dates[dates.length - 1] || '';
@@ -1126,7 +1208,7 @@ function exportCsv() {
   a.click();
 }
 
-['fFrom', 'fTo', 'fState', 'fPtype', 'fCur', 'fComp', 'fNeg'].forEach(id => {
+['fFrom', 'fTo', 'fState', 'fPtype', 'fCur', 'fComp', 'fNeg', 'fBase', 'fDate'].forEach(id => {
   document.getElementById(id).addEventListener('change',
     id === 'fMeasure' ? toggleMeasure : rerender);
 });
@@ -1134,11 +1216,11 @@ document.getElementById('fMeasure').addEventListener('change', toggleMeasure);
 document.getElementById('fTop').addEventListener('change', rerender);
 
 (function init() {
-  const dates = ROWS.map(r => r.date).filter(saneDate).sort();
+  const dates = ROWS.map(r => rowDate(r)).filter(saneDate).sort();
   document.getElementById('fFrom').value = dates[0] || '';
   document.getElementById('fTo').value = dates[dates.length - 1] || '';
 
-  const bad = ROWS.filter(r => r.date && !saneDate(r.date)).length;
+  const bad = ROWS.filter(r => rowDate(r) && !saneDate(rowDate(r))).length;
   if (bad) {
     document.getElementById('warn').innerHTML =
       '<b>Ojo:</b> ' + bad + ' pago(s) tienen una fecha imposible (anio muy lejano). ' +
