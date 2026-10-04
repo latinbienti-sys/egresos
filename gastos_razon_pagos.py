@@ -473,6 +473,7 @@ HTML = r"""<!DOCTYPE html>
             <tr>
               <th>Concepto</th>
               <th class="num">Monto</th>
+              <th>Tipo</th>
               <th class="num">%</th>
               <th class="num">Cant.</th>
             </tr>
@@ -573,6 +574,25 @@ function fmt(v, code) {
 }
 
 function isCo() { return document.getElementById('fMeasure').value === 'co'; }
+
+// Sentido del flujo de caja, para no mezclar ingresos con gastos.
+function isInbound(r) { return r.ptype === 'inbound'; }
+function isOutbound(r) { return r.ptype === 'outbound'; }
+// Descuentos y devoluciones restan al ingreso: son el contra de una venta.
+// Etiqueta de flujo de un grupo de pagos.
+function flowOf(rows) {
+  if (!rows || !rows.length) return 'Ajuste';
+  let inb = 0, outb = 0;
+  rows.forEach(r => { if (isInbound(r)) inb++; else if (isOutbound(r)) outb++; });
+  if (inb && outb) return 'Mixto';
+  if (inb) return 'Entrada';
+  if (outb) return 'Salida';
+  return 'Ajuste';
+}
+function isDiscountOrReturn(r) {
+  const k = String(r.reason || '').toUpperCase();
+  return k.indexOf('DESCUENT') !== -1 || k.indexOf('DEVOL') !== -1 || k.indexOf('PROMO') !== -1;
+}
 function signed() { return document.getElementById('fNeg').checked; }
 
 // Moneda en la que se esta midiendo ahora mismo.
@@ -635,10 +655,11 @@ function group(rows, keyFn) {
 function groupByDoc(rows) {
   const m = new Map();
   rows.forEach(r => {
-    if (!m.has(r.doc)) m.set(r.doc, { key: r.doc, label: r.doc, value: 0, count: 0 });
+    if (!m.has(r.doc)) m.set(r.doc, { key: r.doc, label: r.doc, value: 0, count: 0, rows: [] });
     const g = m.get(r.doc);
     g.value += val(r);
     g.count += 1;
+    g.rows.push(r);
   });
   return Array.from(m.values());
 }
@@ -646,6 +667,10 @@ function groupByDoc(rows) {
 function decorate(nodes, level, parentPath, parentValue, total) {
   return nodes.map(n => ({
     ...n,
+    label: n.key,
+    // Las filas se necesitan para construir el siguiente nivel del desglose.
+    rows: n.rows,
+    flow: flowOf(n.rows),
     path: parentPath + '|L' + level + ':' + n.key,
     level: level,
     parentValue: parentValue,
@@ -667,6 +692,7 @@ function flatRows(nodes) {
 
 // Nivel 0 = Razon de pago, Nivel 1 = Proveedor, Nivel 2 = Documento
 function buildChildren(node) {
+  if (!node.rows || !node.rows.length) return [];
   if (node.level === 0) {
     return decorate(group(node.rows, r => r.partner), 1, node.path, node.value, state.total);
   }
@@ -729,18 +755,64 @@ function renderChips(byReason, total) {
   });
 }
 
+// Desglose del lado del dinero: bruto, ajustes que restan y salidas.
+// Se calculan siempre sobre importes absolutos para que el signo no dependa
+// de como venga el dato en Odoo.
+function breakdown(rows) {
+  const co = isCo();
+  let bruto = 0, desc = 0, eg = 0, odooIn = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const raw = co ? (r.amountCo === null ? 0 : r.amountCo) : r.amount;
+    if (isInbound(r)) {
+      odooIn += raw;
+      if (isDiscountOrReturn(r)) desc += Math.abs(raw);
+      else bruto += Math.abs(raw);
+    } else if (isOutbound(r)) {
+      eg += Math.abs(raw);
+    }
+  }
+  return { bruto: bruto, desc: desc, neto: bruto - desc, egresos: eg,
+           balance: (bruto - desc) - eg, odoo: odooIn };
+}
+
 function renderKpis(rows, byReason, total) {
-  const avg = rows.length ? total / rows.length : 0;
-  const top = byReason[0];
+  const pt = document.getElementById('fPtype').value;
   const card = (label, value, note) =>
     '<div class="kpi"><span>' + label + '</span><b>' + value + '</b>' +
     (note ? '<small>' + note + '</small>' : '') + '</div>';
-  document.getElementById('kpis').innerHTML =
+  let html = '';
+
+  if (pt === 'all') {
+    const k = breakdown(rows);
+    html =
+      card('Ingreso bruto', money(k.bruto), 'Entradas sin descuentos') +
+      card('Descuentos y devoluciones', money(k.desc), 'Restan al ingreso') +
+      card('Total ingresos (netos)', money(k.neto), 'Bruto - descuentos') +
+      card('Total gastos / egresos', money(k.egresos), 'Salidas') +
+      card('Margen / balance', money(k.balance),
+           k.balance >= 0 ? 'Superávit' : 'Déficit') +
+      card('Categorías', byReason.length, 'en ' + M.reason_label);
+    document.getElementById('kpis').innerHTML = html;
+    return;
+  }
+
+  const avg = rows.length ? total / rows.length : 0;
+  const top = byReason[0];
+  const esIngreso = pt === 'inbound';
+  html =
     card('Total analizado', money(total), rows.length + ' registros') +
     card('Ticket promedio', money(avg), 'por pago') +
-    card('Categorias', byReason.length, 'en ' + M.reason_label) +
-    (top ? card('Mayor gasto', money(top.value),
+    card('Categorías', byReason.length, 'en ' + M.reason_label) +
+    (top ? card(esIngreso ? 'Mayor ingreso' : 'Mayor gasto', money(top.value),
                 top.key + ' · ' + pct(top.value / total * 100)) : '');
+
+  if (esIngreso) {
+    const k = breakdown(rows);
+    html += card('Descuentos y devoluciones', money(k.desc), 'Restan al ingreso') +
+            card('Ingreso neto', money(k.neto), 'Bruto - descuentos');
+  }
+  document.getElementById('kpis').innerHTML = html;
 }
 
 const PALETTE = ['#213C83', '#dc2626', '#059669', '#d97706', '#7c3aed',
@@ -972,7 +1044,7 @@ function renderTable(total) {
   const rows = flatRows(state.rows);
   const tb = document.getElementById('tb');
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="4" class="empty">Sin registros para los filtros seleccionados.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="5" class="empty">Sin registros para los filtros seleccionados.</td></tr>';
     return;
   }
   let html = '';
@@ -990,12 +1062,13 @@ function renderTable(total) {
     if (n.level === 2) html += '<span class="lvl">Documento</span>';
     html += '<span>' + escapeHtml(n.label) + '</span></div></td>';
     html += '<td class="num">' + money(n.value) + '</td>';
+    html += '<td>' + escapeHtml(n.flow || 'Ajuste') + '</td>';
     html += '<td class="num">' + pct(n.pct) + '<div class="bar"><i style="width:' +
               Math.min(n.pct, 100) + '%"></i></div></td>';
     html += '<td class="num">' + n.count + '</td></tr>';
   });
   html += '<tr class="tot"><td>Total</td><td class="num">' + money(total) +
-          '</td><td class="num">100.0%</td><td class="num">' + state.count + '</td></tr>';
+          '</td><td></td><td class="num">100.0%</td><td class="num">' + state.count + '</td></tr>';
   tb.innerHTML = html;
 }
 
@@ -1038,14 +1111,14 @@ function setPreset(kind) {
 function exportCsv() {
   const rows = flatRows(state.rows);
   const enc = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
-  const cols = ['Nivel', 'Detalle', 'Monto', 'Moneda', '% Total', 'Cantidad'];
+  const cols = ['Nivel', 'Detalle', 'Monto', 'Moneda', 'Tipo', '% Total', 'Cantidad'];
   let csv = cols.join(',') + '\n';
   rows.forEach(n => {
     csv += [n.level + 1, enc(n.label), n.value.toFixed(2), enc(curKey()),
-            n.pct.toFixed(2), n.count].join(',') + '\n';
+            enc(n.flow || 'Ajuste'), n.pct.toFixed(2), n.count].join(',') + '\n';
   });
   csv += ['', '"TOTAL"', state.total.toFixed(2), enc(curKey()),
-          '100.00', state.count].join(',') + '\n';
+          '', '100.00', state.count].join(',') + '\n';
   const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
