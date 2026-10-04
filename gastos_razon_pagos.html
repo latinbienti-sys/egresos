@@ -350,7 +350,8 @@ function groupByDoc(rows) {
 function decorate(nodes, level, parentPath, parentValue, total) {
   return nodes.map(n => ({
     ...n,
-    path: parentPath + '|L' + level + ':' + n.key,
+    label: n.key,
+    path: parentPath + "|L" + level + ":" + n.key,
     level: level,
     parentValue: parentValue,
     pct: total ? (n.value / total) * 100 : 0
