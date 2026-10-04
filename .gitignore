@@ -1,0 +1,16 @@
+# Credenciales: nunca deben entrar al repositorio ni al HTML publicado.
+*.env
+name.env
+.env
+.env.*
+secrets*.json
+*.pem
+*.key
+
+# Generado por py_compile
+__pycache__/
+*.py[cod]
+
+# Artefactos locales
+*.log
+*.tmp

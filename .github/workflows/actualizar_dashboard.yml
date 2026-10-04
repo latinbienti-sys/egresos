@@ -1,21 +1,32 @@
 name: Actualizar Dashboard
 
+# Regenera el panel de solo lectura con los movimientos de Odoo y lo publica
+# en la rama gh-pages (GitHub Pages).
 on:
   schedule:
-    - cron: '0 */3 * * *'
+    # Cada hora, al minuto 7 para no coincidir con el pico de las 00:00.
+    - cron: '7 * * * *'
   workflow_dispatch:
+    inputs:
+      limite:
+        description: 'Maximo de registros a descargar'
+        required: false
+        default: '200000'
 
 permissions:
   contents: write
 
+# Nunca publicar dos regeneraciones simultaneas sobre la misma rama.
+concurrency:
+  group: actualizar-dashboard
+  cancel-in-progress: false
+
 jobs:
-  generate:
+  generar:
     runs-on: ubuntu-latest
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -23,33 +34,46 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependencias
-        run: python -m pip install --upgrade pip requests
+        run: python -m pip install --upgrade pip
 
-      - name: Generar dashboard desde Odoo
+      - name: Generar el panel desde Odoo (solo lectura)
         env:
+          ODOO_BASE: ${{ secrets.ODOO_BASE }}
+          ODOO_DB: ${{ secrets.ODOO_DB }}
           ODOO_USER: ${{ secrets.ODOO_USER }}
-          ODOO_PASS: ${{ secrets.ODOO_PASS }}
-        run: python server.py --generate
+          ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
+          GASTOS_LIMIT: ${{ github.event.inputs.limite || '200000' }}
+        run: python gastos_razon_pagos.py
 
-      - name: Enviar recordatorios de pago a proveedor
-        env:
-          ODOO_USER: ${{ secrets.ODOO_USER }}
-          ODOO_PASS: ${{ secrets.ODOO_PASS }}
-          LATINBIEN_SMTP_USER: ${{ secrets.LATINBIEN_SMTP_USER }}
-          LATINBIEN_SMTP_PASS: ${{ secrets.LATINBIEN_SMTP_PASS }}
-        run: python send_reminders.py
+      - name: Comprobar que el panel se genero
+        run: |
+          test -s gastos_razon_pagos.html || { echo "::error::no se genero el panel"; exit 1; }
+          grep -q 'const DATA = {"meta"' gastos_razon_pagos.html \
+            || { echo "::error::el panel no trae datos"; exit 1; }
+          grep -q '<tbody id="tb">' gastos_razon_pagos.html \
+            || { echo "::error::el panel esta incompleto"; exit 1; }
+          echo "panel generado: $(du -h gastos_razon_pagos.html | cut -f1)"
 
-      - name: Configurar git
+      - name: Verificar que no se filtren credenciales al panel
+        run: |
+          if grep -qiE 'ODOO_PASS|ODOO_PASSWORD|Bearer [A-Za-z0-9]|"password"|api_key' gastos_razon_pagos.html; then
+            echo "::error::se detectaron credenciales en el HTML publicable"
+            exit 1
+          fi
+          echo "sin credenciales en el artefacto"
+
+      - name: Publicar en gh-pages
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Commit y push
-        run: |
-          git add index.html
-          if git diff --cached --quiet; then
-            echo "No hay cambios en index.html"
+          git fetch origin gh-pages
+          git checkout -B gh-pages origin/gh-pages
+          cp gastos_razon_pagos.html gastos_razon_pagos.html
+          if git diff --quiet -- gastos_razon_pagos.html; then
+            echo "sin cambios: el panel ya estaba actualizado"
           else
-            git commit -m "Dashboard actualizado $(date -u '+%Y-%m-%d %H:%M UTC')"
-            git push
+            git add gastos_razon_pagos.html
+            git commit -m "Panel actualizado $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push origin gh-pages
+            echo "panel publicado"
           fi
