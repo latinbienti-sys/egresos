@@ -1,0 +1,34 @@
+name: Update gastos dashboard
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Generate HTML
+        env:
+          ODOO_BASE: ${{ secrets.ODOO_BASE }}
+          ODOO_DB: ${{ secrets.ODOO_DB }}
+          ODOO_USER: ${{ secrets.ODOO_USER }}
+          ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
+          GASTOS_LIMIT: ${{ secrets.GASTOS_LIMIT || '60000' }}
+        run: |
+          cd gastos_consulta
+          python gastos_razon_pagos.py
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gastos_consulta
+          publish_branch: gh-pages
+          keep_files: false
