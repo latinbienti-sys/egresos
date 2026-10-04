@@ -1,0 +1,55 @@
+name: Actualizar Dashboard
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: python -m pip install --upgrade pip requests
+
+      - name: Generar dashboard desde Odoo
+        env:
+          ODOO_USER: ${{ secrets.ODOO_USER }}
+          ODOO_PASS: ${{ secrets.ODOO_PASS }}
+        run: python server.py --generate
+
+      - name: Enviar recordatorios de pago a proveedor
+        env:
+          ODOO_USER: ${{ secrets.ODOO_USER }}
+          ODOO_PASS: ${{ secrets.ODOO_PASS }}
+          LATINBIEN_SMTP_USER: ${{ secrets.LATINBIEN_SMTP_USER }}
+          LATINBIEN_SMTP_PASS: ${{ secrets.LATINBIEN_SMTP_PASS }}
+        run: python send_reminders.py
+
+      - name: Configurar git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit y push
+        run: |
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "No hay cambios en index.html"
+          else
+            git commit -m "Dashboard actualizado $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
