@@ -1,34 +1,55 @@
-name: Update gastos dashboard
+name: Actualizar Dashboard
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  generate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
         with:
-          ref: main
-      - uses: actions/setup-python@v5
+          fetch-depth: 0
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Generate HTML
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: python -m pip install --upgrade pip requests
+
+      - name: Generar dashboard desde Odoo
         env:
-          ODOO_BASE: ${{ secrets.ODOO_BASE }}
-          ODOO_DB: ${{ secrets.ODOO_DB }}
           ODOO_USER: ${{ secrets.ODOO_USER }}
-          ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
-          GASTOS_LIMIT: ${{ secrets.GASTOS_LIMIT || '60000' }}
+          ODOO_PASS: ${{ secrets.ODOO_PASS }}
+        run: python server.py --generate
+
+      - name: Enviar recordatorios de pago a proveedor
+        env:
+          ODOO_USER: ${{ secrets.ODOO_USER }}
+          ODOO_PASS: ${{ secrets.ODOO_PASS }}
+          LATINBIEN_SMTP_USER: ${{ secrets.LATINBIEN_SMTP_USER }}
+          LATINBIEN_SMTP_PASS: ${{ secrets.LATINBIEN_SMTP_PASS }}
+        run: python send_reminders.py
+
+      - name: Configurar git
         run: |
-          cd gastos_consulta
-          python gastos_razon_pagos.py
-      - name: Deploy to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./gastos_consulta
-          publish_branch: gh-pages
-          keep_files: false
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit y push
+        run: |
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "No hay cambios en index.html"
+          else
+            git commit -m "Dashboard actualizado $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
