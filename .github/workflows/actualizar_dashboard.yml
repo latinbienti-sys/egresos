@@ -62,13 +62,23 @@ jobs:
           fi
           echo "sin credenciales en el artefacto"
 
+      - name: Ejecutar las pruebas contra el panel recien generado
+        run: |
+          set -euo pipefail
+          node test_gastos_razon_pagos.js
+          node test_ingresos_clientes.js
+
       - name: Publicar en gh-pages
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # El HTML generado no se pierde al cambiar de rama: se aparta primero.
+          cp gastos_razon_pagos.html "$RUNNER_TEMP/panel.html"
           git fetch origin gh-pages
           git checkout -B gh-pages origin/gh-pages
-          cp gastos_razon_pagos.html gastos_razon_pagos.html
+          git reset --hard origin/gh-pages
+          cp "$RUNNER_TEMP/panel.html" gastos_razon_pagos.html
           if git diff --quiet -- gastos_razon_pagos.html; then
             echo "sin cambios: el panel ya estaba actualizado"
           else
