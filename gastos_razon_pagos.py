@@ -851,9 +851,10 @@ function breakdown(rows) {
       eg += v;
     }
   }
-  const neto = ventas + anticipos - desc;
-  return { ventas: ventas, anticipos: anticipos, desc: desc, otros: otros,
-           neto: neto, egresos: eg, balance: neto - eg };
+  const bruto = ventas + anticipos + otros;
+  const neto = bruto - desc;
+  return { ventas: ventas, anticipos: anticipos, otros: otros, desc: desc,
+           bruto: bruto, neto: neto, egresos: eg, balance: neto - eg };
 }
 
 function renderKpis(rows, byReason, total) {
@@ -868,9 +869,10 @@ function renderKpis(rows, byReason, total) {
     html =
       card('Ingresos por ventas', money(k.ventas), 'Ventas a clientes') +
       card('Anticipos de clientes', money(k.anticipos), 'Adelantos cobrados') +
-      card('Descuentos y devoluciones', money(k.desc), 'Restan al ingreso') +
-      card('Ingreso neto', money(k.neto), 'Ventas + anticipos - descuentos') +
       (k.otros ? card('Otros ingresos', money(k.otros), 'Sin clasificar') : '') +
+      card('Total ingresos', money(k.bruto), 'Suma de los ingresos') +
+      card('Descuentos y devoluciones', money(k.desc), 'Restan del total') +
+      card('Ingreso neto', money(k.neto), 'Total ingresos - descuentos') +
       (k.egresos ? card('Total gastos / egresos', money(k.egresos), 'Salidas') : '') +
       (k.egresos ? card('Margen / balance', money(k.balance),
                         k.balance >= 0 ? 'Superávit' : 'Déficit') : '') +

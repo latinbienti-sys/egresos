@@ -90,7 +90,9 @@ const descPos = run('breakdown')([
 check('ventas = 1000', near(descPos.ventas, 1000), descPos.ventas);
 check('anticipos = 500', near(descPos.anticipos, 500), descPos.anticipos);
 check('descuentos = 120 (positivo en origen)', near(descPos.desc, 120), descPos.desc);
-check('neto = ventas + anticipos - descuentos = 1380',
+check('total ingresos = ventas + anticipos = 1500', near(descPos.bruto, 1500), descPos.bruto);
+check('total ingresos NO descuenta todavia', near(descPos.bruto, 1620) === false, descPos.bruto);
+check('neto = total ingresos - descuentos = 1380',
   near(descPos.neto, 1380), descPos.neto);
 check('neto NO resta dos veces', !near(descPos.neto, 1260), descPos.neto);
 
@@ -100,6 +102,8 @@ const descNeg = run('breakdown')([
 ]);
 check('una devolucion ya negativa en origen tambien resta 200',
   near(descNeg.desc, 200) && near(descNeg.neto, 800), descNeg.neto);
+check('el total de ingresos ignora los descuentos',
+  near(descNeg.bruto, 1000), descNeg.bruto);
 
 console.log('\nFiltro por rango de fecha');
 els.fFrom.value = '2026-10-01';
@@ -118,29 +122,37 @@ check('los registros sin fecha de publicacion quedan fuera del rango',
 check('octubre: hay ventas', oct.ventas > 0, oct.ventas);
 check('octubre: hay anticipos', oct.anticipos > 0, oct.anticipos);
 check('octubre: hay descuentos', oct.desc > 0, oct.desc);
-check('octubre: neto = ventas + anticipos - descuentos',
-  near(oct.neto, oct.ventas + oct.anticipos - oct.desc),
-  oct.neto + ' vs ' + (oct.ventas + oct.anticipos - oct.desc));
+check('octubre: total ingresos = ventas + anticipos + otros',
+  near(oct.bruto, oct.ventas + oct.anticipos + oct.otros),
+  oct.bruto + ' vs ' + (oct.ventas + oct.anticipos + oct.otros));
+check('octubre: el total de ingresos es mayor al neto por los descuentos',
+  oct.bruto > oct.neto);
+check('octubre: total ingresos - descuentos = ingreso neto',
+  near(oct.neto, oct.bruto - oct.desc), oct.neto + ' vs ' + (oct.bruto - oct.desc));
 check('octubre: el neto es mayor que las ventas por el efecto de los anticipos',
   oct.neto > oct.ventas);
 check('octubre: los pagos contados coinciden con los del payload',
   octRows === octAll.length);
 
 console.log('\nOctubre 2026 (cifras vivas, se reimprimen para revision)');
-console.log('  ventas     = ' + money(oct.ventas));
-console.log('  anticipos  = ' + money(oct.anticipos));
-console.log('  descuentos = ' + money(oct.desc));
-console.log('  neto       = ' + money(oct.neto));
-console.log('  pagos      = ' + octRows);
+console.log('  ventas           = ' + money(oct.ventas));
+console.log('  anticipos        = ' + money(oct.anticipos));
+console.log('  TOTAL INGRESOS   = ' + money(oct.bruto));
+console.log('  descuentos       = ' + money(oct.desc));
+console.log('  ingreso neto     = ' + money(oct.neto));
+console.log('  pagos            = ' + octRows);
 
 console.log('\nKPI de ingresos');
 const kpi = els.kpis.innerHTML;
 check('muestra Ingresos por ventas', kpi.includes('Ingresos por ventas'));
 check('muestra Anticipos de clientes', kpi.includes('Anticipos de clientes'));
+check('muestra el total de ingresos', kpi.includes('Total ingresos'));
 check('muestra Descuentos y devoluciones', kpi.includes('Descuentos y devoluciones'));
 check('muestra Ingreso neto', kpi.includes('Ingreso neto'));
-check('explica la formula en la nota',
-  kpi.includes('Ventas + anticipos - descuentos'));
+check('el total de ingresos aparece antes que el neto',
+  kpi.indexOf('Total ingresos') < kpi.indexOf('Ingreso neto'));
+check('explica que el descuento resta del total',
+  kpi.includes('Total ingresos - descuentos'));
 
 console.log('\nBase de flujo (payment_type) sigue disponible');
 els.fBase.value = 'flow';
