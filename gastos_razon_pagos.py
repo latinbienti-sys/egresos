@@ -21,6 +21,10 @@ Ajustes opcionales por variable de entorno:
   GASTOS_MODEL         default account.payment
   GASTOS_REASON_FIELD  default x_razonpagos
   GASTOS_LIMIT         default 20000 (topes de registros a traer)
+  GASTOS_SYNC          auto|full. "auto" hace descarga incremental cuando hay
+                       un panel previo: Odoo solo recibe la consulta de los
+                       pagos que cambiaron desde la ultima corrida.
+  GASTOS_BASE_HTML     ruta del panel previo que se usa como base incremental.
 """
 import json
 import os
@@ -51,6 +55,10 @@ SIN_CLASIFICAR = "(Sin clasificar)"
 RPC_INTENTOS = int(os.environ.get("GASTOS_RPC_INTENTOS", "5"))
 # Registros por peticion: respuesta acotada para que no se corte la descarga.
 PAGE_SIZE = int(os.environ.get("GASTOS_PAGE_SIZE", "4000"))
+# "auto": solo se consulta a Odoo lo que cambio desde la ultima corrida.
+SYNC = os.environ.get("GASTOS_SYNC", "auto").lower()
+# Panel publicado que se usa como base de la descarga incremental.
+BASE_HTML = os.environ.get("GASTOS_BASE_HTML", "")
 
 cj = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
@@ -189,8 +197,8 @@ def fetch_currencies(names):
     return out
 
 
-def fetch_rows(cfg):
-    fields = ["id"]
+def fetch_rows(cfg, extra_domain=None):
+    fields = ["id", "write_date"]
     for key in ("measure", "measure_co", "date_field", "state_field", "ptype_field",
                 "partner_field", "name_field", "company_field", "currency_field",
                 "co_currency_field", "pubdate_field", "partner_type_field",
@@ -200,7 +208,8 @@ def fetch_rows(cfg):
     fields.append(cfg["reason_field"])
     fields = sorted(set(fields))
 
-    total = call_kw(MODEL, "search_count", [[]])
+    base_domain = list(extra_domain or [])
+    total = call_kw(MODEL, "search_count", [base_domain])
     # Paginacion por cursor sobre id. Con offset, los pagos que Odoo registra
     # durante la descarga desplazan las paginas y repiten filas; con "id < cursor"
     # el corte queda fijo. Se pide de mas nuevo a mas viejo para que un limite
@@ -211,7 +220,10 @@ def fetch_rows(cfg):
     while len(filas) < objetivo:
         salto = min(PAGE_SIZE, objetivo - len(filas))
         # search_read recibe el dominio como primer argumento posicional.
-        args = [[["id", "<", cursor]]] if cursor is not None else [[]]
+        if cursor is None:
+            args = [base_domain]
+        else:
+            args = [base_domain + [["id", "<", cursor]]]
         lote = call_kw(
             MODEL, "search_read", args,
             {"fields": fields, "limit": salto, "order": "id desc"},
@@ -259,30 +271,46 @@ def resolve_reason_labels(cfg, raw_values):
     return {v: str(v) for v in uniq}
 
 
-def build_payload():
-    cfg = detect_fields()
-    print("Modelo:", MODEL)
-    print("  Razon    :", cfg["reason_field"], "(%s)" % cfg["reason_meta"].get("type"))
-    print("  Moneda pago      :", cfg["measure"])
-    print("  Moneda compania  :", cfg["measure_co"] or "(no disponible)")
-    print("  Fecha   :", cfg["date_field"])
-    print("  Estado  :", cfg["state_field"] or "(sin estado)")
-    print("  Tipo    :", cfg["ptype_field"] or "(sin tipo de pago)")
+def load_previous():
+    """Lee el panel ya publicado para reutilizar sus filas sin bajarlas de Odoo."""
+    path = BASE_HTML or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "gastos_razon_pagos.html")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = f.read()
+    except OSError:
+        return None
+    marker = "const DATA = "
+    i = doc.find(marker)
+    if i < 0:
+        return None
+    i += len(marker)
+    j = doc.find("\n", i)
+    if j < 0:
+        return None
+    blob = doc[i:j].strip()
+    if blob.endswith(";"):
+        blob = blob[:-1]
+    try:
+        data = json.loads(blob)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not data.get("rows"):
+        return None
+    meta = data.get("meta") or {}
+    # Con un panel truncado o de otro esquema no se puede mergear con criterio.
+    if meta.get("truncated") or meta.get("model") != MODEL:
+        return None
+    return {"meta": meta, "rows": data["rows"]}
 
-    raw, total, fields = fetch_rows(cfg)
-    print("Registros encontrados:", total, "| descargados:", len(raw),
-          "(limite %d)" % LIMIT)
-    if total > len(raw):
-        print("  AVISO: se descargaron solo %d de %d. Sube GASTOS_LIMIT."
-              % (len(raw), total))
 
-    raw_reasons = [r.get(cfg["reason_field"]) for r in raw]
-    reason_labels = resolve_reason_labels(cfg, raw_reasons)
-
+def transform_rows(raw, cfg, reason_labels):
+    """Filas crudas de Odoo al formato del panel (una sola transformacion)."""
     def rel(v):
         return v[1] if isinstance(v, (list, tuple)) and len(v) > 1 else ""
 
-    cur_names, co_names, companies = set(), set(), set()
     out = []
     for r in raw:
         val = r.get(cfg["reason_field"])
@@ -303,7 +331,6 @@ def build_payload():
         is_supplier = (ptype_partner == "supplier") and not internal
         cur = rel(r.get("currency_id")) or "(vacia)"
         co = rel(r.get("company_id")) or "(vacia)"
-        co_cur = ""
         out.append({
             "id": r.get("id"),
             "doc": r.get("name") or ("#" + str(r.get("id"))),
@@ -314,7 +341,7 @@ def build_payload():
             "amount": float(r.get(cfg["measure"]) or 0.0),
             "amountCo": float(r.get(cfg["measure_co"]) or 0.0) if cfg["measure_co"] else None,
             "cur": cur,
-            "curCo": co_cur,
+            "curCo": cur,
             "comp": co,
             "state": r.get(cfg["state_field"]) if cfg.get("state_field") else "",
             "ptype": r.get(cfg["ptype_field"]) if cfg.get("ptype_field") else "",
@@ -325,9 +352,9 @@ def build_payload():
             "internal": internal,
             "isCustomer": is_customer,
             "isSupplier": is_supplier,
+            # Sello de modificacion: marca desde donde sigue la proxima corrida.
+            "wd": r.get("write_date") or "",
         })
-        cur_names.add(cur)
-        companies.add(co)
 
     # La moneda de compania se deduce de los campos *_signed: si el pago esta en
     # VEF pero la compania es USD, la medida "co" viene en USD.
@@ -336,14 +363,73 @@ def build_payload():
         mc = r.get(cfg["measure_co"]) if cfg["measure_co"] else None
         if mc:
             row["curCo"] = row["cur"] if abs(mc - m) < 0.01 else _guess_company_currency(r)
-        else:
-            row["curCo"] = row["cur"]
-        co_names.add(row["curCo"])
+    return out
 
+
+def build_payload():
+    cfg = detect_fields()
+    print("Modelo:", MODEL)
+    print("  Razon    :", cfg["reason_field"], "(%s)" % cfg["reason_meta"].get("type"))
+    print("  Moneda pago      :", cfg["measure"])
+    print("  Moneda compania  :", cfg["measure_co"] or "(no disponible)")
+    print("  Fecha   :", cfg["date_field"])
+    print("  Estado  :", cfg["state_field"] or "(sin estado)")
+    print("  Tipo    :", cfg["ptype_field"] or "(sin tipo de pago)")
+
+    total = call_kw(MODEL, "search_count", [[]])
+    prev = load_previous() if SYNC == "auto" else None
+    watermark = ((prev or {}).get("meta") or {}).get("watermark") or ""
+    prev_rows = (prev or {}).get("rows") or []
+    modo, out, tramo = "completa", [], None
+
+    if prev and watermark and prev_rows:
+        # Descarga incremental: Odoo solo recibe los pagos tocados desde la
+        # ultima corrida. Todo lo demas se reutiliza tal cual del panel previo.
+        delta_raw, _, _ = fetch_rows(cfg, [("write_date", ">", watermark)])
+        delta_out = transform_rows(
+            delta_raw, cfg,
+            resolve_reason_labels(cfg, [r.get(cfg["reason_field"]) for r in delta_raw]))
+        merged = {r["id"]: r for r in prev_rows}
+        for row in delta_out:
+            merged[row["id"]] = row
+        rows = sorted(merged.values(), key=lambda r: r["id"] or 0, reverse=True)
+        # Odoo puede borrar pagos y write_date no lo cuenta: si el recuento no
+        # cuadra se descarta el truco y se baja todo, para no publicar fantasmas.
+        if len(rows) == total:
+            modo, out, tramo = "incremental", rows, delta_out
+            print("Base previa: %d filas | nuevas o modificadas: %d"
+                  % (len(prev_rows), len(delta_out)))
+        else:
+            print("  AVISO: el recuento no cuadra (%d en el panel, %d en Odoo)."
+                  " Se ignora la base previa y se descarga todo." % (len(rows), total))
+    else:
+        print("  AVISO: sin base previa utilizable; se hace descarga completa.")
+
+    if modo == "completa":
+        raw, _, fields = fetch_rows(cfg)
+        out = transform_rows(
+            raw, cfg,
+            resolve_reason_labels(cfg, [r.get(cfg["reason_field"]) for r in raw]))
+        print("Registros encontrados:", total, "| descargados:", len(raw),
+              "(limite %d)" % LIMIT)
+        if total > len(raw):
+            print("  AVISO: se descargaron solo %d de %d. Sube GASTOS_LIMIT."
+                  % (len(raw), total))
+
+    for row in out:
+        if not row.get("curCo"):
+            row["curCo"] = row["cur"]
+    cur_names = {r["cur"] for r in out}
+    co_names = {r["curCo"] for r in out}
+    companies = {r["comp"] for r in out}
     currencies = fetch_currencies(cur_names | co_names)
     for code in (cur_names | co_names) - set(currencies):
         currencies[code] = {"name": code, "symbol": code, "position": "after",
                             "decimal_separator": ".", "thousands_sep": ","}
+
+    # El sello avanza solo: una fila vieja conserva su write_date original.
+    sellados = [r.get("wd") for r in out if r.get("wd")]
+    watermark = max([watermark] + sellados) if sellados else watermark
 
     return {
         "meta": {
@@ -365,6 +451,9 @@ def build_payload():
             "loaded_records": len(out),
             "truncated": total > len(out),
             "generated": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "sync": modo,
+            "sync_changed": len(tramo or []),
+            "watermark": watermark,
             "currencies": currencies,
             "companies": sorted(companies),
             "company_currencies": sorted(co_names),

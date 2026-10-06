@@ -28,6 +28,20 @@ jobs:
       - name: Clonar repositorio
         uses: actions/checkout@v4
 
+      # Base incremental: el panel ya publicado. Con el solo marco Odoo de
+      # "lo que cambio desde la ultima corrida", en vez de bajar los ~36k
+      # pagos completos cada hora. Si falla, el generador baja todo solo.
+      - name: Descargar el panel publicado como base
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/contents/gastos_razon_pagos.html?ref=gh-pages" \
+            -H "Accept: application/vnd.github.raw" \
+            > "$RUNNER_TEMP/base.html" || exit 0
+          grep -q 'const DATA = {"meta"' "$RUNNER_TEMP/base.html" || rm -f "$RUNNER_TEMP/base.html"
+
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
@@ -43,6 +57,8 @@ jobs:
           ODOO_USER: ${{ secrets.ODOO_USER }}
           ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
           GASTOS_LIMIT: ${{ github.event.inputs.limite || '200000' }}
+          GASTOS_SYNC: auto
+          GASTOS_BASE_HTML: ${{ runner.temp }}/base.html
         run: python gastos_razon_pagos.py
 
       - name: Comprobar que el panel se genero
@@ -67,6 +83,7 @@ jobs:
           set -euo pipefail
           node test_gastos_razon_pagos.js
           node test_ingresos_clientes.js
+          node test_sync_incremental.js
 
       - name: Publicar en gh-pages
         run: |

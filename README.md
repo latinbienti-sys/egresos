@@ -83,12 +83,34 @@ Los pagos sin fecha de publicación quedan fuera de cualquier corte con rango de
 
 El selector **Base** permite volver al criterio anterior por `payment_type` y **Usar fecha** a `date`.
 
+## Actualización cada hora
+
+El workflow `.github/workflows/actualizar_dashboard.yml` corre con `cron: '7 * * * *'`
+y regenera el panel en `gh-pages`.
+
+Cada corrida **descarga solo lo que cambió**. El panel publicado trae un sello
+(`meta.watermark`) con el `write_date` más reciente, y a Odoo solo se le piden
+los pagos con `write_date` posterior a ese sello; el resto de las filas se
+reutiliza tal cual del panel anterior. Así el mes corriente se actualiza y el
+histórico no se mueve, sin volver a bajar los ~36 mil pagos cada hora.
+
+Salvaguardas: si el recuento de Odoo no cuadra con el panel previo (alguien
+borró un pago), si el panel anterior está truncado, si no hay base utilizable o
+si `GASTOS_SYNC=full`, se hace la descarga completa. Cada fila guarda su propio
+`wd`, de modo que un pago tocado una vez se vuelve a leer siempre.
+
+Variables: `GASTOS_SYNC` (`auto` por defecto, `full` para forzar) y
+`GASTOS_BASE_HTML` (ruta del panel que sirve de base; por defecto el de la
+misma carpeta).
+
 ## Pruebas
 
 ```powershell
 node test_gastos_razon_pagos.js
 node test_ingresos_clientes.js
+node test_sync_incremental.js
 ```
 
-99 pruebas (61 de agregación, filtros, histórico año-mes, drill-down de 3 niveles y escapes;
-38 de la base de ingresos de clientes contra los datos reales). No conectan a Odoo.
+170 pruebas (90 de agregación, filtros, histórico año-mes, drill-down de 3 niveles y escapes;
+62 de la base de ingresos de clientes contra los datos reales; 18 de la descarga
+incremental). No conectan a Odoo.
