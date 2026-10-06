@@ -36,13 +36,15 @@ El panel no inventa criterios: cada base reproduce el dominio de un favorito rea
 
 | Base | Favorito | Dominio |
 |---|---|---|
-| Clientes | `inglb` | `partner_type = customer`, `is_internal_transfer = False`, `state = posted` |
+| Clientes | `inglb` | `partner_type = customer`, `is_internal_transfer = False` (el favorito **no** filtra estado) |
 | Proveedores | `Gastoslb` (`ir.filters` 467) | `partner_type = supplier`, `is_internal_transfer = False`, `state = posted` |
 | Flujo de pagos | — | `payment_type` (sí distingue entrada de salida) |
 
 El selector **Tipo** fija la base: Salidas → Proveedores (Gastoslb), Entradas → Clientes (inglb), Ambos → Flujo de pagos. Por eso Salidas **no** se miden con `payment_type`: el dominio de Gastoslb se apoya en `partner_type = supplier`.
 
-Los dos favoritos excluyen transferencias internas y los pagos que no están en estado `posted`, por eso el panel arranca en Publicado.
+Los dos favoritos excluyen transferencias internas. No son simétricos: `Gastoslb` exige `state = posted`, mientras que `inglb` **no trae filtro de estado**, así que su listado en Odoo también suma borradores y cancelados.
+
+El panel muestra **solo pagos publicados** en las dos bases. Por eso, en Entradas, el total del panel es menor que el del favorito `inglb`: la tarjeta *Cierre por año y mes* lo declara y recuerda que con Estado = Todos se reproduce el favorito tal cual.
 
 ## Panel
 

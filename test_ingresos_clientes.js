@@ -79,7 +79,13 @@ check('Ambos se miden por flujo de pagos',
   const esperado = pt === 'inbound' ? 'customer' : pt === 'outbound' ? 'supplier' : 'flow';
   check('al elegir "' + pt + '" la base queda en "' + esperado + '"',
     els.fBase.value === esperado, els.fBase.value);
+  // Decision del usuario: las dos bases muestran solo pagos publicados, aunque
+  // el favorito inglb de Odoo no traiga filtro de estado.
+  check('al elegir "' + pt + '" el estado queda en Publicado',
+    els.fState.value === 'posted', els.fState.value);
 });
+check('stateForBase() devuelve posted para las tres bases',
+  run('stateForBase()') === 'posted');
 // Volver al escenario de ingresos con el que arranca esta suite.
 els.fPtype.value = 'inbound';
 run('syncBaseWithPtype()');

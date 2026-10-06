@@ -693,8 +693,16 @@ function baseForPtype(pt) {
   if (pt === 'outbound') return 'supplier';
   return 'flow';
 }
+// Los favoritos no son simmetricos. Leidos de ir.filters en Odoo:
+//   Gastoslb: partner_type=supplier, is_internal_transfer=False, state=posted
+//   inglb:    partner_type=customer, is_internal_transfer=False   (sin estado)
+// Decision del usuario: el panel muestra solo pagos publicados en las dos
+// bases. El favorito inglb de Odoo no trae filtro de estado, asi que su
+// listado suma tambien borradores y cancelados; el panel lo declara aparte.
+function stateForBase() { return 'posted'; }
 function syncBaseWithPtype() {
   document.getElementById('fBase').value = baseForPtype(ptypeEl().value);
+  document.getElementById('fState').value = stateForBase();
 }
 // Los ingresos de clientes se agrupan por fecha de publicacion, no por date.
 function usePubDate() { return document.getElementById('fDate').value === 'pub'; }
@@ -967,7 +975,15 @@ function renderPorAno(rows) {
   const nom = baseSupplier() ? 'Gastoslb (proveedores)'
            : baseCustomer() ? 'inglb (clientes)' : 'flujo de pagos';
   document.getElementById('hAno').textContent = 'Cierre por ano y mes — ' + nom;
-  document.getElementById('anoHint').innerHTML = usePubDate()
+  // El favorito inglb de Odoo no filtra por estado: su listado suma tambien
+  // borradores y cancelados. El panel muestra solo publicados, asi que se dice
+  // en la misma tarjeta que es la que se compara contra Odoo.
+  const notaEstado = (baseCustomer() && document.getElementById('fState').value !== 'all')
+    ? ' <b>Ojo:</b> el favorito inglb de Odoo <u>no</u> filtra por estado, asi que su listado ' +
+      'de 2026 suma tambien borradores y cancelados y da mas pagos que este panel. Aqui solo se ' +
+      'cuentan los <b>publicados</b>: pon "Todos" en Estado para reproducir el favorito.'
+    : '';
+  document.getElementById('anoHint').innerHTML = (usePubDate()
     ? 'Agrupado por <b>fecha de publicacion</b> (ano / mes), el mismo criterio con el que ' +
       'Odoo agrupa los favoritos inglb y Gastoslb. ' +
       (sinFecha ? sinFecha + ' pago(s) sin fecha quedan fuera de los cortes por mes y se listan al final.'
@@ -977,7 +993,7 @@ function renderPorAno(rows) {
       'totales por ano <b>no coincidiran</b> con el listado de Odoo. ' +
       'Vuelve a "Fecha de publicacion" para comparar. ' +
       (sinFecha ? sinFecha + ' pago(s) sin fecha quedan fuera de los cortes por mes y se listan al final.'
-                : 'Todos los pagos tienen fecha.');
+                : 'Todos los pagos tienen fecha.')) + notaEstado;
   document.getElementById('sub').textContent =
     granN + ' pagos · ' + money(granTotal);
 }
@@ -1435,10 +1451,13 @@ function exportCsv() {
 // y se avisa en vez de dejar que las cifras parezcan un dato de Odoo.
 function refreshDateWarn() {
   const w = document.getElementById('warn');
-  const msg = '<b class="alerta">Ojo:</b> estas cifras usan la <b>fecha del pago</b>. ' +
-    'Los favoritos inglb y Gastoslb de Odoo agrupan por <b>fecha de publicacion</b>, ' +
-    'asi que los totales por ano y mes no coincidiran con el listado de Odoo.';
-  w.innerHTML = (usePubDate() ? '' : msg + '<br>') + AVISOS_BASE;
+  const partes = [];
+  if (!usePubDate()) {
+    partes.push('<b class="alerta">Ojo:</b> estas cifras usan la <b>fecha del pago</b>. ' +
+      'Los favoritos inglb y Gastoslb de Odoo agrupan por <b>fecha de publicacion</b>, ' +
+      'asi que los totales por ano y mes no coincidiran con el listado de Odoo.');
+  }
+  w.innerHTML = partes.join('<br>') + (partes.length && AVISOS_BASE ? '<br>' : '') + AVISOS_BASE;
 }
 
 ['fFrom', 'fTo', 'fState', 'fCur', 'fComp', 'fNeg', 'fBase', 'fDate'].forEach(id => {
@@ -1452,11 +1471,10 @@ document.getElementById('fMeasure').addEventListener('change', toggleMeasure);
 ptypeEl().addEventListener('change', function () {
   syncBaseWithPtype();
   activeReason = null;
+  refreshDateWarn();
   rerender();
 });
-document.getElementById('fTop').addEventListener('change', rerender);
 document.getElementById('fNoDate').addEventListener('change', rerender);
-document.getElementById('fTop').addEventListener('change', rerender);
 
 (function init() {
   const dates = ROWS.map(r => rowDate(r)).filter(saneDate).sort();
