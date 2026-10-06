@@ -70,7 +70,10 @@ for i, (r, p, d, amt, amtco, st) in enumerate(${FIXTURE_PY}):
                  'partner': p, 'reason': (r if r else m.SIN_CLASIFICAR),
                  'amount': amt, 'amountCo': amtco,
                  'cur': 'VEF', 'curCo': 'USD', 'comp': 'LATINOAMERICANA DE BIENES Y SERVICIOS',
-                 'state': st, 'ptype': 'outbound'})
+                 'state': st, 'ptype': 'outbound',
+                  'partnerType': 'supplier', 'internal': False,
+                  'isCustomer': False, 'isSupplier': True,
+                  'pubdate': d, 'pubmonth': d[:7]})
 payload = {'meta': {'model': 'account.payment', 'reason_field': 'x_razonpagos',
     'reason_label': 'Razón de Pago', 'reason_type': 'selection', 'measure': 'amount',
     'measure_label': 'Monto del pago', 'measure_co': 'amount_company_currency_signed',
@@ -136,6 +139,13 @@ globalThis.__expand = (level) => {
 };
 globalThis.__expN = () => Object.keys(expanded).length;
 globalThis.__cacheN = () => Object.keys(childCache).length;
+globalThis.__snapRows = DATA.rows.slice();
+globalThis.__pushRows = (rs) => { rs.forEach(r => DATA.rows.push(r)); rerender(); };
+globalThis.__restoreRows = () => {
+  DATA.rows.length = 0;
+  DATA.rows.push(...globalThis.__snapRows);
+  rerender();
+};
 `, sb);
 // renderDonut y renderHistory se dibujan en este orden: el ultimo es el historico.
 const H = () => sb.__histCfg();
@@ -185,9 +195,13 @@ check('vuelve a moneda de compania = ' + POSTED_CO.toFixed(2),
   approx(totalIn(els.tb), POSTED_CO), totalIn(els.tb));
 
 console.log('\nFiltro por tipo de pago');
+// El panel reajusta la base al cambiar el tipo de pago: Entradas => Clientes.
 els.fPtype.value = 'inbound';
+sb.syncBaseWithPtype();
 sb.rerender();
-check('entradas -> 0 filas (fixture solo outbound)',
+check('elegir Entradas lleva la base a clientes', els.fBase.value === 'customer',
+  els.fBase.value);
+check('entradas -> 0 filas (el fixture es todo de proveedores)',
   totalIn(els.tb) === 0 || els.tb.innerHTML.includes('Sin registros'));
 check('el historico avisa que no hay datos',
   /Sin datos/.test(els.histHint.textContent), els.histHint.textContent);
@@ -196,6 +210,7 @@ check('el lienzo se limpio con su tamano real (no 1x1)',
   JSON.stringify(els.hist.cleared));
 els.fPtype.value = 'outbound';
 els.fState.value = 'posted';
+sb.syncBaseWithPtype();
 sb.rerender();
 
 console.log('\nDrill-down de tres niveles');
@@ -305,6 +320,86 @@ check('el HTML cierra el script una sola vez',
 console.log('\nExportacion CSV');
 check('funcion exportCsv presente', typeof sb.exportCsv === 'function');
 check('funcion rerender presente', typeof sb.rerender === 'function');
+
+console.log('\nCierre por ano y mes (mismo agrupamiento que el favorito en Odoo)');
+const NOM_MES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+const filas = (h) => h.split('<tr').slice(1).map(t => t.replace(/<[^>]+>/g, '|').replace(/\s+/g, ' ').trim());
+const celda = (h, etiqueta) => {
+  const f = filas(h).find(t => new RegExp('\\|\\s*' + etiqueta + '\\s*\\|').test(t));
+  if (!f) return NaN;
+  const n = f.split('|').map(s => s.trim()).filter(Boolean).pop();
+  return Number(String(n).replace(/[^0-9.]/g, ''));
+};
+
+// El fixture original solo tiene 2026; se inyectan meses de otros anios y un
+// pago sin fecha para probar el agrupamiento por ano y el renglon aparte.
+const EXTRA = [
+  { date: '2025-03-10', pubdate: '2025-03-10', pubmonth: '2025-03', amountCo: -10, state: 'posted', isSupplier: true },
+  { date: '2025-03-20', pubdate: '2025-03-20', pubmonth: '2025-03', amountCo: -20, state: 'posted', isSupplier: true },
+  { date: '2025-11-05', pubdate: '2025-11-05', pubmonth: '2025-11', amountCo: -5,  state: 'posted', isSupplier: true },
+  { date: '2027-01-09', pubdate: '2027-01-09', pubmonth: '2027-01', amountCo: -7,  state: 'posted', isSupplier: true },
+  { date: '',           pubdate: '',           pubmonth: '',        amountCo: -3,  state: 'posted', isSupplier: true },
+  { date: '2026-06-09', pubdate: '2026-06-09', pubmonth: '2026-06', amountCo: -999, state: 'draft',  isSupplier: true },
+];
+sb.__pushRows(EXTRA);
+els.fPtype.value = 'outbound';
+els.fState.value = 'posted';
+// Se limpia el rango que init()|Windows fijo al fixture: los meses inyectados
+// caen fuera de 2026-01..2026-02 y el renglon sin fecha necesita su casilla.
+els.fFrom.value = '';
+els.fTo.value = '';
+els.fNoDate.checked = true;
+sb.syncBaseWithPtype();
+sb.rerender();
+
+let anoH = els.tbAno.innerHTML;
+check('la tabla se lleno y trae total general', anoH.includes('<tbody>') && anoH.includes('Total general'));
+check('aparecen los tres anios del fixture inyectado',
+  ['2025', '2026', '2027'].every(a => anoH.includes('>' + a + '<')));
+check('cada mes se rotula con su nombre y su numero',
+  anoH.includes('>Mar 03<') && anoH.includes('>Ene 01<') && anoH.includes('>Nov 11<'));
+// Subtotal de 2025 = 10 + 20 + 5 = 35
+check('el subtotal de 2025 suma sus dos meses', Math.abs(celda(anoH, 'Total 2025') - 35) < 0.005,
+  celda(anoH, 'Total 2025'));
+// 2026 solo tiene el fixture posted (4.71): el draft queda fuera y el pago sin
+// fecha no pertenece a ningun ano, se lista al final.
+check('el subtotal de 2026 excluye el draft', Math.abs(celda(anoH, 'Total 2026') - POSTED_CO) < 0.005,
+  celda(anoH, 'Total 2026'));
+check('2027 aparece con su unico mes', Math.abs(celda(anoH, 'Total 2027') - 7) < 0.005,
+  celda(anoH, 'Total 2027'));
+// Total general = 4.71 + 35 + 7 + 3 = 49.71
+check('el total general es la suma de todos los anios',
+  Math.abs(celda(anoH, 'Total general') - 49.71) < 0.005, celda(anoH, 'Total general'));
+check('el pago sin fecha tiene su propio renglon con su monto',
+  Math.abs(celda(anoH, 'Sin fecha') - 3) < 0.005, celda(anoH, 'Sin fecha'));
+check('el renglon sin fecha no inventa un mes',
+  !/Sin fecha<\/td><td class="r">\s*1\s*<\/td>/.test('') && /—<\/b><\/td><td><b>Sin fecha/.test(anoH));
+check('la suma de subtotales por anio cuadra con el total general',
+  Math.abs(35 + POSTED_CO + 7 + 3 - 49.71) < 0.005);
+check('el encabezado nombra el criterio de la base activa',
+  /Gastoslb \(proveedores\)/.test(els.hAno.textContent), els.hAno.textContent);
+check('el resumen refleja el mismo total que la tabla',
+  /49[,.]71/.test(els.sub.textContent), els.sub.textContent);
+
+// Cambiar de base debe cambiar el encabezado y dejar la tabla sin meses.
+sb.__restoreRows();
+els.fPtype.value = 'inbound';
+sb.syncBaseWithPtype();
+sb.rerender();
+check('al cambiar a Entradas el encabezado pasa a inglb',
+  /inglb \(clientes\)/.test(els.hAno.textContent), els.hAno.textContent);
+check('sin filas de clientes la tabla no lista ningun anio ni mes',
+  !/Total 20\d\d/.test(els.tbAno.innerHTML) && !/Sin fecha/.test(els.tbAno.innerHTML));
+check('y su total general queda en cero',
+  Math.abs(celda(els.tbAno.innerHTML, 'Total general')) < 0.005,
+  celda(els.tbAno.innerHTML, 'Total general'));
+sb.__restoreRows();
+els.fPtype.value = 'outbound';
+sb.syncBaseWithPtype();
+sb.rerender();
+check('al volver a Salidas se recupera el total original',
+  Math.abs(celda(els.tbAno.innerHTML, 'Total general') - POSTED_CO) < 0.005,
+  celda(els.tbAno.innerHTML, 'Total general'));
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log('\n' + pass + ' OK / ' + fail + ' FALLA');

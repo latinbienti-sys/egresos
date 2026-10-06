@@ -30,14 +30,29 @@ python gastos_razon_pagos.py
 
 Abre `gastos_razon_pagos.html` con doble clic. Usa Python estándar; Chart.js se carga por CDN.
 
+## Bases y favoritos de Odoo
+
+El panel no inventa criterios: cada base reproduce el dominio de un favorito real de `account.payment`.
+
+| Base | Favorito | Dominio |
+|---|---|---|
+| Clientes | `inglb` | `partner_type = customer`, `is_internal_transfer = False`, `state = posted` |
+| Proveedores | `Gastoslb` (`ir.filters` 467) | `partner_type = supplier`, `is_internal_transfer = False`, `state = posted` |
+| Flujo de pagos | — | `payment_type` (sí distingue entrada de salida) |
+
+El selector **Tipo** fija la base: Salidas → Proveedores (Gastoslb), Entradas → Clientes (inglb), Ambos → Flujo de pagos. Por eso Salidas **no** se miden con `payment_type`: el dominio de Gastoslb se apoya en `partner_type = supplier`.
+
+Los dos favoritos excluyen transferencias internas y los pagos que no están en estado `posted`, por eso el panel arranca en Publicado.
+
 ## Panel
 
 - KPIs: total analizado, ticket promedio, nº de categorías, mayor gasto.
 - Ingresos de clientes: ventas + anticipos − descuentos = ingreso neto.
+- Cierre por año y mes: tabla agrupada por año / mes con subtotal por año y total general, igual que el agrupamiento `x_fecha_de_publicacion:year` / `:month` de los favoritos en Odoo. Los pagos sin fecha se listan aparte al final.
 - Histórico año-mes: barras apiladas por razón de pago (un solo eje). Clic en un bloque para filtrar.
 - Dona: distribución por razón. Clic para filtrar tabla e histórico.
 - Desglose 3 niveles: Razón de pago → Proveedor → Documento (subtotales, %, barras). Expandible/colapsable.
-- Filtros en vivo: fechas, estado (Publicado/Borrador/Todos), tipo (Salidas/Entradas/Ambos), base (Clientes/Flujo de pagos), fecha usada (Publicación/Pago), medida (Moneda de compañía/Moneda del pago), moneda (VEF/USD), compañía, signo contable.
+- Filtros en vivo: fechas, estado (Publicado/Borrador/Todos), tipo (Salidas/Entradas/Ambos), base (Clientes/Proveedores/Flujo de pagos), casilla de pagos sin fecha, fecha usada (Publicación/Pago), medida (Moneda de compañía/Moneda del pago), moneda (VEF/USD), compañía, signo contable.
 - Atajos: Este mes / Este año / Todo. Exportar CSV.
 - Predeterminado: Publicado + Clientes, moneda de compañía (USD). Multicompañía y multimoneda.
 

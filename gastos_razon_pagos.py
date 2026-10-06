@@ -201,24 +201,41 @@ def fetch_rows(cfg):
     fields = sorted(set(fields))
 
     total = call_kw(MODEL, "search_count", [[]])
-    order = "%s desc" % cfg["date_field"] if cfg.get("date_field") else "id desc"
-    # El dataset completo son varios MB y una sola respuesta se corta con
-    # facilidad, asi que se pide por tramos de forma estable.
+    # Paginacion por cursor sobre id. Con offset, los pagos que Odoo registra
+    # durante la descarga desplazan las paginas y repiten filas; con "id < cursor"
+    # el corte queda fijo. Se pide de mas nuevo a mas viejo para que un limite
+    # se lleve los movimientos recientes.
     filas = []
-    salto = PAGE_SIZE
-    while len(filas) < min(LIMIT, total or LIMIT):
+    cursor = None
+    objetivo = min(LIMIT, total or LIMIT)
+    while len(filas) < objetivo:
+        salto = min(PAGE_SIZE, objetivo - len(filas))
+        # search_read recibe el dominio como primer argumento posicional.
+        args = [[["id", "<", cursor]]] if cursor is not None else [[]]
         lote = call_kw(
-            MODEL,
-            "search_read",
-            [[]],
-            {"fields": fields, "limit": salto, "offset": len(filas),
-             "order": order},
+            MODEL, "search_read", args,
+            {"fields": fields, "limit": salto, "order": "id desc"},
         )
         if not lote:
             break
         filas.extend(lote)
+        cursor = lote[-1]["id"]
         print("  descargados: %d" % len(filas), file=sys.stderr)
     rows = filas[:LIMIT] if LIMIT else filas
+    # Red de seguridad: publicar un total inflado por filas repetidas seria
+    # peor que avisar, asi que se corta la generacion si ocurre.
+    vistos = set()
+    repetidos = 0
+    for r in rows:
+        rid = r.get("id")
+        if rid in vistos:
+            repetidos += 1
+        vistos.add(rid)
+    if repetidos:
+        raise RuntimeError(
+            "La descarga devolvio %d registro(s) repetido(s). No se publica un "
+            "total inflado; revisa la paginacion." % repetidos
+        )
     return rows, total, fields
 
 
@@ -282,6 +299,8 @@ def build_payload():
                          if cfg.get("partner_type_field") else "") or ""
         internal = bool(r.get(cfg["internal_field"])) if cfg.get("internal_field") else False
         is_customer = (ptype_partner == "customer") and not internal
+        # Base proveedores: dominio del favorito "Gastoslb" de Proveedores/Pagos.
+        is_supplier = (ptype_partner == "supplier") and not internal
         cur = rel(r.get("currency_id")) or "(vacia)"
         co = rel(r.get("company_id")) or "(vacia)"
         co_cur = ""
@@ -305,6 +324,7 @@ def build_payload():
             "partnerType": ptype_partner,
             "internal": internal,
             "isCustomer": is_customer,
+            "isSupplier": is_supplier,
         })
         cur_names.add(cur)
         companies.add(co)
@@ -416,6 +436,9 @@ HTML = r"""<!DOCTYPE html>
   .hint { color:#8892a8; font-size:11.5px; margin:0 0 10px; }
   .chart-box { position:relative; height:330px; }
   .tw { max-height:560px; overflow-y:auto; }
+  table .r { text-align:right; font-variant-numeric:tabular-nums; }
+  table tr.sub td { background:#f6f8fc; border-top:2px solid #d7deee; }
+  table tr.tot td { background:#213C83; color:#fff; font-weight:700; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th { background:#f0f3fa; text-align:left; padding:9px 10px; font-size:11px;
        text-transform:uppercase; letter-spacing:.4px; color:#213C83;
@@ -471,6 +494,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="f"><label>Base</label>
       <select id="fBase">
         <option value="customer">Clientes (favorito inglb)</option>
+        <option value="supplier">Proveedores (favorito Gastoslb)</option>
         <option value="flow">Flujo de pagos (payment_type)</option>
       </select>
     </div>
@@ -494,6 +518,10 @@ HTML = r"""<!DOCTYPE html>
     </div>
     <label class="chk" title="En salidas, la contabilidad registra el monto de compania con signo negativo">
       <input type="checkbox" id="fNeg"> Mostrar signo contable (negativo)
+    </label>
+    <label class="chk" id="wrapNoDate"
+      title="Hay pagos sin fecha de publicacion. Esta opcion los conserva aunque se filtre por rango.">
+      <input type="checkbox" id="fNoDate" checked> Incluir pagos sin fecha
     </label>
     <div class="quick">
       <button class="btn" onclick="setPreset('month')">Este mes</button>
@@ -524,6 +552,12 @@ HTML = r"""<!DOCTYPE html>
       </div>
     </div>
     <div class="chart-box" style="height:400px"><canvas id="hist"></canvas></div>
+  </div>
+
+  <div class="card" style="margin-bottom:20px">
+    <h3 id="hAno">Cierre por ano y mes</h3>
+    <p class="hint" id="anoHint"></p>
+    <div class="tw"><table id="tbAno"></table></div>
   </div>
 
   <div class="grid">
@@ -643,13 +677,21 @@ function fmt(v, code) {
 
 function isCo() { return document.getElementById('fMeasure').value === 'co'; }
 
-// Base de seleccion: clientes (como el favorito inglb de Pagos) o flujo de pagos.
-// El criterio de "clientes" no sabe distinguir salida de entrada, asi que se
-// empareja sola con el tipo de pago para no rotular mal los egresos.
-function baseCustomer() { return document.getElementById('fBase').value === 'customer'; }
+// Base de seleccion: clientes (favorito inglb de Pagos), proveedores
+// (favorito Gastoslb de Proveedores/Pagos) o flujo de pagos.
+// El tipo de pago manda: cada favorito esta anclado a un partner_type, asi que
+// el preset evita rotular los egresos con el criterio de los ingresos.
+function baseVal() { return document.getElementById('fBase').value; }
+function baseCustomer() { return baseVal() === 'customer'; }
+function baseSupplier() { return baseVal() === 'supplier'; }
 function ptypeEl() { return document.getElementById('fPtype'); }
-// Salidas y Ambos se miden por payment_type; Entradas usan el criterio inglb.
-function baseForPtype(pt) { return pt === 'inbound' ? 'customer' : 'flow'; }
+// Salidas => Gastoslb (partner_type = supplier); Entradas => inglb (customer);
+// Ambos => payment_type, que si distingue la direccion del movimiento.
+function baseForPtype(pt) {
+  if (pt === 'inbound') return 'customer';
+  if (pt === 'outbound') return 'supplier';
+  return 'flow';
+}
 function syncBaseWithPtype() {
   document.getElementById('fBase').value = baseForPtype(ptypeEl().value);
 }
@@ -730,20 +772,30 @@ function filtered() {
   const cu = document.getElementById('fCur').value;
   const co = document.getElementById('fComp').value;
   const cust = baseCustomer();
+  const supl = baseSupplier();
   return ROWS.filter(r => {
-    // En base clientes solo entran pagos de clientes que no son transferencias internas.
+    // En base clientes/proveedores solo entran pagos del tipo de socio
+    // correspondiente que no sean transferencias internas (favoritos inglb y
+    // Gastoslb). La base de flujo no usa partner_type.
     if (cust && !r.isCustomer) return false;
+    if (supl && !r.isSupplier) return false;
     const d = rowDate(r);
+    const conRango = !!(from || to);
     // Con un rango activo, un pago sin fecha en el criterio elegido no puede
-    // evaluarse y queda fuera (si no, se colaria en todos los cortes).
-    if (from || to) {
-      if (!d) return false;
-      if (from && d < from) return false;
-      if (to && d > to) return false;
+    // evaluarse. Se conserva solo si el interruptor esta activo, de modo que
+    // esos pagos nunca desaparecen en silencio.
+    if (conRango) {
+      if (!d) {
+        if (!document.getElementById('fNoDate').checked) return false;
+      } else {
+        if (from && d < from) return false;
+        if (to && d > to) return false;
+      }
     }
     if (st !== 'all' && r.state !== st) return false;
-    // El tipo de flujo solo aplica a la base de flujo: en clientes manda partner_type.
-    if (!cust && M.ptype_field && pt !== 'all' && r.ptype !== pt) return false;
+    // El tipo de flujo solo aplica a la base de flujo: en clientes y proveedores
+    // manda partner_type, que es lo que definen los favoritos.
+    if (!cust && !supl && M.ptype_field && pt !== 'all' && r.ptype !== pt) return false;
     if (!isCo() && cu && r.cur !== cu) return false;
     if (co && r.comp !== co) return false;
     if (activeReason !== null && r.reason !== activeReason) return false;
@@ -839,9 +891,85 @@ function render() {
 
   renderChips(byReason, total);
   renderKpis(rows, byReason, total);
+  renderPorAno(rows);
   renderDonut(byReason, total);
   renderHistory();
   renderTable(total);
+}
+
+// Cierre por ano y mes, con subtotal por ano: el mismo agrupamiento que
+// x_fecha_de_publicacion:year / :month de los favoritos inglb y Gastoslb.
+const MES_NOMBRE = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+
+function renderPorAno(rows) {
+  const porMes = new Map();
+  let sinFecha = 0, sinFechaMonto = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const m = rowMonth(r);
+    if (!m) { sinFecha++; sinFechaMonto += Math.abs(val(r)); continue; }
+    if (!porMes.has(m)) porMes.set(m, { valor: 0, n: 0 });
+    const g = porMes.get(m);
+    g.valor += Math.abs(val(r));
+    g.n++;
+  }
+  const meses = Array.from(porMes.keys()).sort();
+  const anios = [];
+  const porAno = new Map();
+  for (let i = 0; i < meses.length; i++) {
+    const a = meses[i].slice(0, 4);
+    if (!porAno.has(a)) { porAno.set(a, { valor: 0, n: 0 }); anios.push(a); }
+    const g = porMes.get(meses[i]);
+    const acc = porAno.get(a);
+    acc.valor += g.valor; acc.n += g.n;
+  }
+  anios.sort();
+
+  let h = '<thead><tr><th>Año</th><th>Mes</th><th class="r">Pagos</th>' +
+          '<th class="r">Monto</th></tr></thead><tbody>';
+  let granTotal = 0, granN = 0;
+  for (let i = 0; i < anios.length; i++) {
+    const a = anios[i];
+    const acc = porAno.get(a);
+    const delAnio = meses.filter(m => m.slice(0, 4) === a);
+    for (let j = 0; j < delAnio.length; j++) {
+      const m = delAnio[j];
+      const g = porMes.get(m);
+      const esUlt = j === delAnio.length - 1;
+      h += '<tr' + (esUlt ? ' class="sub"' : '') + '>' +
+           (j === 0 ? '<td><b>' + a + '</b></td>' : '<td></td>') +
+           '<td>' + MESES[Number(m.slice(5, 7)) - 1] + ' ' + m.slice(5) + '</td>' +
+           '<td class="r">' + g.n + '</td>' +
+           '<td class="r">' + money(g.valor) + '</td></tr>';
+      if (esUlt) {
+        h += '<tr class="sub"><td></td><td><b>Total ' + a + '</b></td>' +
+             '<td class="r"><b>' + acc.n + '</b></td>' +
+             '<td class="r"><b>' + money(acc.valor) + '</b></td></tr>';
+      }
+    }
+    granTotal += acc.valor; granN += acc.n;
+  }
+  if (sinFecha) {
+    h += '<tr class="sub"><td><b>—</b></td><td><b>Sin fecha</b></td>' +
+         '<td class="r"><b>' + sinFecha + '</b></td>' +
+         '<td class="r"><b>' + money(sinFechaMonto) + '</b></td></tr>';
+    granTotal += sinFechaMonto; granN += sinFecha;
+  }
+  h += '<tr class="tot"><td></td><td>Total general</td>' +
+       '<td class="r">' + granN + '</td>' +
+       '<td class="r">' + money(granTotal) + '</td></tr></tbody>';
+  document.getElementById('tbAno').innerHTML = h;
+
+  const nom = baseSupplier() ? 'Gastoslb (proveedores)'
+           : baseCustomer() ? 'inglb (clientes)' : 'flujo de pagos';
+  document.getElementById('hAno').textContent = 'Cierre por ano y mes — ' + nom;
+  document.getElementById('anoHint').textContent =
+    'Agrupado por ' + (usePubDate() ? 'fecha de publicacion' : 'fecha del pago') +
+    ' (ano / mes), igual que el favorito en Odoo. ' +
+    (sinFecha ? sinFecha + ' pago(s) sin fecha quedan fuera de los meses y se listan al final.'
+              : 'Todos los pagos tienen fecha.');
+  document.getElementById('sub').textContent =
+    granN + ' pagos · ' + money(granTotal);
 }
 
 function renderChips(byReason, total) {
@@ -897,6 +1025,16 @@ function breakdown(rows) {
            bruto: bruto, neto: neto, egresos: eg, balance: neto - eg };
 }
 
+// Tarjeta con los pagos que no tienen fecha en el criterio elegido. Se
+// declaran en el panel para que ninguno se pierda en silencio.
+function cardSinFecha(rows, card) {
+  const sinFecha = rows.filter(r => !rowDate(r));
+  if (!sinFecha.length) return '';
+  const mto = sinFecha.reduce((a, r) => a + Math.abs(val(r)), 0);
+  return card('Sin fecha de publicacion', money(sinFecha.length),
+              money(mto) + ' · no entran en cortes mensuales');
+}
+
 function renderKpis(rows, byReason, total) {
   const pt = document.getElementById('fPtype').value;
   const card = (label, value, note) =>
@@ -904,7 +1042,7 @@ function renderKpis(rows, byReason, total) {
     (note ? '<small>' + note + '</small>' : '') + '</div>';
   let html = '';
 
-  if (pt === 'all' || baseCustomer()) {
+  if (baseCustomer()) {
     const k = breakdown(rows);
     html =
       card('Ingresos por ventas', money(k.ventas), 'Ventas a clientes') +
@@ -916,16 +1054,18 @@ function renderKpis(rows, byReason, total) {
       (k.egresos ? card('Total gastos / egresos', money(k.egresos), 'Salidas') : '') +
       (k.egresos ? card('Margen / balance', money(k.balance),
                         k.balance >= 0 ? 'Superávit' : 'Déficit') : '') +
-      card('Categorías', byReason.length, 'en ' + M.reason_label);
+      card('Categorías', byReason.length, 'en ' + M.reason_label) +
+      cardSinFecha(rows, card);
     document.getElementById('kpis').innerHTML = html;
     return;
   }
 
   const avg = rows.length ? total / rows.length : 0;
   const top = byReason[0];
-  const esIngreso = pt === 'inbound' && !baseCustomer();
-  const esEgreso = pt === 'outbound' && !baseCustomer();
-  const rotuloTotal = esEgreso ? 'Total de egresos'
+  const esIngreso = pt === 'inbound' && !baseCustomer() && !baseSupplier();
+  const esEgreso = baseSupplier() || (pt === 'outbound' && !baseCustomer());
+  const rotuloTotal = baseSupplier() ? 'Total de egresos (Gastoslb)'
+                   : esEgreso ? 'Total de egresos'
                    : esIngreso ? 'Total de ingresos' : 'Total analizado';
   const rotuloMayor = esIngreso ? 'Mayor ingreso' : 'Mayor gasto';
   html =
@@ -941,14 +1081,17 @@ function renderKpis(rows, byReason, total) {
             card('Ingreso neto', money(k.neto), 'Bruto - descuentos');
   }
 
+  html += cardSinFecha(rows, card);
+
   // Aviso de coherencia: el criterio de clientes no trae la direccion del
   // pago, asi que sin cambiar la base a flujo el filtro no puede aplicarse.
-  if (baseCustomer() && pt !== 'all') {
-    html += card('Filtro de direccion inactivo',
-                 money(0),
-                 'La base Clientes no distingue entrada de salida. ' +
-                 'Cambia la base a Flujo de pagos para aplicar "' +
-                 (pt === 'inbound' ? 'Entradas' : 'Salidas') + '".');
+  if ((baseCustomer() || baseSupplier()) && pt !== 'all') {
+    const nom = baseSupplier() ? 'Proveedores' : 'Clientes';
+    const otro = baseSupplier() ? 'Clientes' : 'Proveedores';
+    html += card('Criterio por socio, no por direccion', money(0),
+                 'La base ' + nom + ' no usa payment_type: es el dominio del ' +
+                 'favorito. Para filtrar por direccion usa Flujo de pagos; ' +
+                 'para los ingresos usa ' + otro + '.');
   } else if (esEgreso || pt === 'all') {
     const dir = rows.reduce((a, r) => {
       if (isInbound(r)) a.inb++; else if (isOutbound(r)) a.outb++;
@@ -1288,6 +1431,7 @@ ptypeEl().addEventListener('change', function () {
   rerender();
 });
 document.getElementById('fTop').addEventListener('change', rerender);
+document.getElementById('fNoDate').addEventListener('change', rerender);
 document.getElementById('fTop').addEventListener('change', rerender);
 
 (function init() {
@@ -1295,12 +1439,22 @@ document.getElementById('fTop').addEventListener('change', rerender);
   document.getElementById('fFrom').value = dates[0] || '';
   document.getElementById('fTo').value = dates[dates.length - 1] || '';
 
+  let avisos = '';
   const bad = ROWS.filter(r => rowDate(r) && !saneDate(rowDate(r))).length;
   if (bad) {
-    document.getElementById('warn').innerHTML =
-      '<b>Ojo:</b> ' + bad + ' pago(s) tienen una fecha imposible (anio muy lejano). ' +
-      'Quedan fuera del rango por defecto para no distortions el historico. Revisa esas fechas en Odoo.';
+    avisos += '<b>Ojo:</b> ' + bad + ' pago(s) tienen una fecha imposible (anio muy lejano). ' +
+      'Quedan fuera del rango por defecto para no distorsionar el historico.<br>';
   }
+  // Los pagos sin fecha no se corrigen en Odoo: el panel los conserva y los
+  // declara aparte para que la decision sea de quien consulta.
+  const sinFecha = ROWS.filter(r => !rowDate(r)).length;
+  if (sinFecha) {
+    avisos += '<b>Ojo:</b> ' + sinFecha + ' pago(s) no tienen ' +
+      (usePubDate() ? 'fecha de publicacion' : 'fecha de pago') +
+      '. Siguen visibles con el interruptor "Incluir pagos sin fecha" y quedan ' +
+      'fuera de los cortes por mes. No se modifica Odoo: se reportan aparte.';
+  }
+  document.getElementById('warn').innerHTML = avisos;
 
   syncMeasureUI();
   syncBaseWithPtype();

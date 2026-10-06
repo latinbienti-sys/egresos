@@ -66,8 +66,9 @@ check('baseCustomer() activo por defecto al elegir Entradas',
 check('usePubDate() activo por defecto en el fixture', run('usePubDate()') === true);
 
 console.log('\nPreset base segun tipo de pago');
-check('Salidas obligan a la base de flujo de pagos',
-  run('baseForPtype("outbound")') === 'flow');
+// Salidas usa el dominio del favorito Gastoslb: partner_type = supplier.
+check('Salidas obligan a la base de proveedores',
+  run('baseForPtype("outbound")') === 'supplier');
 check('Entradas obligan a la base de clientes',
   run('baseForPtype("inbound")') === 'customer');
 check('Ambos se miden por flujo de pagos',
@@ -75,7 +76,7 @@ check('Ambos se miden por flujo de pagos',
 ['outbound', 'inbound', 'all'].forEach(pt => {
   els.fPtype.value = pt;
   run('syncBaseWithPtype()');
-  const esperado = pt === 'inbound' ? 'customer' : 'flow';
+  const esperado = pt === 'inbound' ? 'customer' : pt === 'outbound' ? 'supplier' : 'flow';
   check('al elegir "' + pt + '" la base queda en "' + esperado + '"',
     els.fBase.value === esperado, els.fBase.value);
 });
