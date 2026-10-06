@@ -24,10 +24,11 @@ function mk(id) {
   return els[id];
 }
 els.fState = mk('fState'); els.fState.value = 'posted';
-els.fPtype = mk('fPtype'); els.fPtype.value = 'all';
+// Entradas: el preset del panel lleva la base a clientes al abrir.
+els.fPtype = mk('fPtype'); els.fPtype.value = 'inbound';
 els.fMeasure = mk('fMeasure'); els.fMeasure.value = 'co';
 els.fNeg = mk('fNeg'); els.fNeg.checked = false;
-els.fBase = mk('fBase'); els.fBase.value = 'customer';
+els.fBase = mk('fBase'); els.fBase.value = 'flow';
 els.fDate = mk('fDate'); els.fDate.value = 'pub';
 ['fCur', 'fComp'].forEach(k => els[k] = mk(k));
 els.fFrom = mk('fFrom');
@@ -60,8 +61,28 @@ check('la mayoria tiene fecha de publicacion', conCampo > ROWS.length * 0.8,
   conCampo + '/' + ROWS.length);
 check('hay clientes identified', ROWS.filter(r => r.isCustomer).length > 0);
 
-check('baseCustomer() activo por defecto en el fixture', run('baseCustomer()') === true);
+check('baseCustomer() activo por defecto al elegir Entradas',
+  run('baseCustomer()') === true);
 check('usePubDate() activo por defecto en el fixture', run('usePubDate()') === true);
+
+console.log('\nPreset base segun tipo de pago');
+check('Salidas obligan a la base de flujo de pagos',
+  run('baseForPtype("outbound")') === 'flow');
+check('Entradas obligan a la base de clientes',
+  run('baseForPtype("inbound")') === 'customer');
+check('Ambos se miden por flujo de pagos',
+  run('baseForPtype("all")') === 'flow');
+['outbound', 'inbound', 'all'].forEach(pt => {
+  els.fPtype.value = pt;
+  run('syncBaseWithPtype()');
+  const esperado = pt === 'inbound' ? 'customer' : 'flow';
+  check('al elegir "' + pt + '" la base queda en "' + esperado + '"',
+    els.fBase.value === esperado, els.fBase.value);
+});
+// Volver al escenario de ingresos con el que arranca esta suite.
+els.fPtype.value = 'inbound';
+run('syncBaseWithPtype()');
+check('tras el recorrido la base vuelve a clientes', els.fBase.value === 'customer');
 
 console.log('\nClasificacion de conceptos');
 const mkRow = (reason) => run(`({ reason: ${JSON.stringify(reason)}, isCustomer: true,
@@ -155,14 +176,30 @@ check('explica que el descuento resta del total',
   kpi.includes('Total ingresos - descuentos'));
 
 console.log('\nBase de flujo (payment_type) sigue disponible');
-els.fBase.value = 'flow';
-els.fDate.value = 'pay';
+// "Ambos" es el tipo de pago que corresponde a la base de flujo.
+els.fPtype.value = 'all';
+run('syncBaseWithPtype()');
+check('"Ambos" selecciona la base de flujo', run('baseCustomer()') === false);
 run('render();');
+const ambos = run('filtered()');
 check('en base flujo no se filtran los pagos por isCustomer',
-  run('filtered().some(r => !r.isCustomer)') === true);
-els.fBase.value = 'customer';
+  ambos.some(r => !r.isCustomer), ambos.length + ' registros');
+check('en base flujo conviven entradas y salidas',
+  ambos.some(r => r.ptype === 'inbound') && ambos.some(r => r.ptype === 'outbound'));
+const soloEgresos = ambos.filter(r => r.ptype === 'outbound');
+check('las salidas nunca traen monto positivo (convencion contable)',
+  soloEgresos.length > 0 &&
+  soloEgresos.every(r => (r.amountCo || 0) <= 0), soloEgresos.length);
+check('las entradas nunca traen monto negativo',
+  ambos.filter(r => r.ptype === 'inbound').every(r => (r.amountCo || 0) >= 0));
+
+// Volver a Entradas debe devolver el criterio de clientes.
+els.fPtype.value = 'inbound';
+run('syncBaseWithPtype()');
 els.fDate.value = 'pub';
 run('render();');
+check('al volver a Entradas la base vuelve a clientes',
+  run('baseCustomer()') === true);
 check('al volver a clientes vuelve a acotar',
   run('filtered().every(r => r.isCustomer)') === true);
 

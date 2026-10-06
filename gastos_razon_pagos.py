@@ -25,7 +25,9 @@ Ajustes opcionales por variable de entorno:
 import json
 import os
 import sys
+import time
 import urllib.request
+import http.client
 import http.cookiejar
 from datetime import datetime
 
@@ -45,6 +47,10 @@ DATE_CANDIDATES = ["payment_date", "date", "invoice_date"]
 # Fecha usada por el favorito "inglb" de Pagos para agrupar ingresos de clientes.
 PUB_DATE_FIELD = os.environ.get("GASTOS_PUBDATE_FIELD", "x_fecha_de_publicacion")
 SIN_CLASIFICAR = "(Sin clasificar)"
+# Reintentos ante cortes de conexion en la descarga del dataset.
+RPC_INTENTOS = int(os.environ.get("GASTOS_RPC_INTENTOS", "5"))
+# Registros por peticion: respuesta acotada para que no se corte la descarga.
+PAGE_SIZE = int(os.environ.get("GASTOS_PAGE_SIZE", "4000"))
 
 cj = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
@@ -55,8 +61,23 @@ def rpc(url, method, params):
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
     )
-    resp = opener.open(req, timeout=120)
-    return json.loads(resp.read().decode())
+    # La lectura completa del dataset son varios MB: una conexion que se corta
+    # a mitad no debe tumbar toda la generacion, se reintenta con espera.
+    ultimo = None
+    for intento in range(RPC_INTENTOS):
+        try:
+            resp = opener.open(req, timeout=120)
+            crudo = resp.read()
+            return json.loads(crudo.decode())
+        except (http.client.IncompleteRead, http.client.HTTPException, ConnectionError,
+                TimeoutError, OSError) as exc:
+            ultimo = exc
+            print("  aviso: la llamada %s se corto (%s). Reintento %d/%d"
+                  % (method, type(exc).__name__, intento + 1, RPC_INTENTOS),
+                  file=sys.stderr)
+            time.sleep(2 * (intento + 1))
+    raise RuntimeError("Fallo la llamada %s tras %d intentos: %s"
+                       % (method, RPC_INTENTOS, ultimo))
 
 
 def call_kw(model, method, args=None, kwargs=None):
@@ -181,12 +202,23 @@ def fetch_rows(cfg):
 
     total = call_kw(MODEL, "search_count", [[]])
     order = "%s desc" % cfg["date_field"] if cfg.get("date_field") else "id desc"
-    rows = call_kw(
-        MODEL,
-        "search_read",
-        [[]],
-        {"fields": fields, "limit": LIMIT, "order": order},
-    )
+    # El dataset completo son varios MB y una sola respuesta se corta con
+    # facilidad, asi que se pide por tramos de forma estable.
+    filas = []
+    salto = PAGE_SIZE
+    while len(filas) < min(LIMIT, total or LIMIT):
+        lote = call_kw(
+            MODEL,
+            "search_read",
+            [[]],
+            {"fields": fields, "limit": salto, "offset": len(filas),
+             "order": order},
+        )
+        if not lote:
+            break
+        filas.extend(lote)
+        print("  descargados: %d" % len(filas), file=sys.stderr)
+    rows = filas[:LIMIT] if LIMIT else filas
     return rows, total, fields
 
 
@@ -612,7 +644,15 @@ function fmt(v, code) {
 function isCo() { return document.getElementById('fMeasure').value === 'co'; }
 
 // Base de seleccion: clientes (como el favorito inglb de Pagos) o flujo de pagos.
+// El criterio de "clientes" no sabe distinguir salida de entrada, asi que se
+// empareja sola con el tipo de pago para no rotular mal los egresos.
 function baseCustomer() { return document.getElementById('fBase').value === 'customer'; }
+function ptypeEl() { return document.getElementById('fPtype'); }
+// Salidas y Ambos se miden por payment_type; Entradas usan el criterio inglb.
+function baseForPtype(pt) { return pt === 'inbound' ? 'customer' : 'flow'; }
+function syncBaseWithPtype() {
+  document.getElementById('fBase').value = baseForPtype(ptypeEl().value);
+}
 // Los ingresos de clientes se agrupan por fecha de publicacion, no por date.
 function usePubDate() { return document.getElementById('fDate').value === 'pub'; }
 
@@ -884,11 +924,15 @@ function renderKpis(rows, byReason, total) {
   const avg = rows.length ? total / rows.length : 0;
   const top = byReason[0];
   const esIngreso = pt === 'inbound' && !baseCustomer();
+  const esEgreso = pt === 'outbound' && !baseCustomer();
+  const rotuloTotal = esEgreso ? 'Total de egresos'
+                   : esIngreso ? 'Total de ingresos' : 'Total analizado';
+  const rotuloMayor = esIngreso ? 'Mayor ingreso' : 'Mayor gasto';
   html =
-    card('Total analizado', money(total), rows.length + ' registros') +
+    card(rotuloTotal, money(total), rows.length + ' registros') +
     card('Ticket promedio', money(avg), 'por pago') +
     card('Categorías', byReason.length, 'en ' + M.reason_label) +
-    (top ? card(esIngreso ? 'Mayor ingreso' : 'Mayor gasto', money(top.value),
+    (top ? card(rotuloMayor, money(top.value),
                 top.key + ' · ' + pct(top.value / total * 100)) : '');
 
   if (esIngreso) {
@@ -896,6 +940,29 @@ function renderKpis(rows, byReason, total) {
     html += card('Descuentos y devoluciones', money(k.desc), 'Restan al ingreso') +
             card('Ingreso neto', money(k.neto), 'Bruto - descuentos');
   }
+
+  // Aviso de coherencia: el criterio de clientes no trae la direccion del
+  // pago, asi que sin cambiar la base a flujo el filtro no puede aplicarse.
+  if (baseCustomer() && pt !== 'all') {
+    html += card('Filtro de direccion inactivo',
+                 money(0),
+                 'La base Clientes no distingue entrada de salida. ' +
+                 'Cambia la base a Flujo de pagos para aplicar "' +
+                 (pt === 'inbound' ? 'Entradas' : 'Salidas') + '".');
+  } else if (esEgreso || pt === 'all') {
+    const dir = rows.reduce((a, r) => {
+      if (isInbound(r)) a.inb++; else if (isOutbound(r)) a.outb++;
+      return a;
+    }, { inb: 0, outb: 0 });
+    const otros = rows.length - dir.inb - dir.outb;
+    const nota = otros
+      ? 'Sin payment_type: ' + otros + ' registro(s)'
+      : dir.inb && dir.outb
+        ? dir.inb + ' entradas y ' + dir.outb + ' salidas'
+        : dir.inb ? 'Todas entradas' : 'Todas salidas';
+    html += card('Control de direccion', money(rows.length), nota);
+  }
+
   document.getElementById('kpis').innerHTML = html;
 }
 
@@ -1210,11 +1277,17 @@ function exportCsv() {
   a.click();
 }
 
-['fFrom', 'fTo', 'fState', 'fPtype', 'fCur', 'fComp', 'fNeg', 'fBase', 'fDate'].forEach(id => {
-  document.getElementById(id).addEventListener('change',
-    id === 'fMeasure' ? toggleMeasure : rerender);
+['fFrom', 'fTo', 'fState', 'fCur', 'fComp', 'fNeg', 'fBase', 'fDate'].forEach(id => {
+  document.getElementById(id).addEventListener('change', rerender);
 });
 document.getElementById('fMeasure').addEventListener('change', toggleMeasure);
+// Cambiar el tipo de pago reajusta la base y vuelve a dibujar.
+ptypeEl().addEventListener('change', function () {
+  syncBaseWithPtype();
+  activeReason = null;
+  rerender();
+});
+document.getElementById('fTop').addEventListener('change', rerender);
 document.getElementById('fTop').addEventListener('change', rerender);
 
 (function init() {
@@ -1230,6 +1303,7 @@ document.getElementById('fTop').addEventListener('change', rerender);
   }
 
   syncMeasureUI();
+  syncBaseWithPtype();
   render();
 })();
 </script>
