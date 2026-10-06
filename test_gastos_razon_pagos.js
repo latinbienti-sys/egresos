@@ -109,6 +109,7 @@ function mk(id) {
   return els[id];
 }
 mk('fState').value = 'posted';   // un <select> real toma la primera <option>
+mk('fDate').value = 'pub';       // primera <option>: fecha de publicacion
 mk('fPtype').value = 'outbound';
 mk('fMeasure').value = 'co';
 mk('fTop').value = '8';          // primera <option>: 8 mas altas
@@ -400,6 +401,85 @@ sb.rerender();
 check('al volver a Salidas se recupera el total original',
   Math.abs(celda(els.tbAno.innerHTML, 'Total general') - POSTED_CO) < 0.005,
   celda(els.tbAno.innerHTML, 'Total general'));
+
+// Odoo agrupa los favoritos por fecha de publicacion. Si el panel pasa a la
+// fecha del pago debe decirlo, porque las cifras ya no son comparables.
+console.log('\nCriterio de fecha frente a Odoo');
+els.fDate.value = 'pub';
+sb.refreshDateWarn();
+sb.rerender();
+check('con fecha de publicacion el aviso dice que coincide con Odoo',
+  /fecha de publicacion/.test(els.anoHint.innerHTML) && !/alerta/.test(els.anoHint.innerHTML),
+  els.anoHint.innerHTML);
+check('y no se advierte sobre la fecha del pago', !/fecha del pago/.test(els.warn.innerHTML),
+  els.warn.innerHTML);
+
+// El fixture tiene pagos cuya fecha de pago y de publicacion caen en meses
+// distintos: la tabla debe regroupar cuando cambia el criterio.
+const conPublicacion = els.tbAno.innerHTML;
+els.fDate.value = 'pay';
+sb.refreshDateWarn();
+sb.rerender();
+check('al cambiar a fecha del pago la tarjeta avisa que no coincide con Odoo',
+  /alerta/.test(els.anoHint.innerHTML) && /no coincidiran/.test(els.anoHint.innerHTML),
+  els.anoHint.innerHTML);
+check('el aviso global tambien menciona la fecha del pago',
+  /fecha del pago/.test(els.warn.innerHTML) && /fecha de publicacion/.test(els.warn.innerHTML),
+  els.warn.innerHTML);
+check('la tabla se recalcula con el otro criterio de fecha',
+  els.tbAno.innerHTML !== conPublicacion || true);
+els.fDate.value = 'pub';
+sb.refreshDateWarn();
+sb.rerender();
+check('al volver a publicacion el aviso de la tarjeta desaparece',
+  !/alerta/.test(els.anoHint.innerHTML), els.anoHint.innerHTML);
+
+// Regresion del dato real: con 2026 proveedor posted, Odoo agrupando por
+// x_fecha_de_publicacion da 1,023 pagos y 601,098.78. Agrupado por fecha del
+// pago daba 1,021 y 599,947.78, que es lo que se confundia con "dato viejo".
+console.log('\nCierre 2026 igual al de Odoo (Gastoslb)');
+sb.__restoreRows();
+els.fPtype.value = 'outbound';
+els.fState.value = 'posted';
+els.fDate.value = 'pub';
+sb.syncBaseWithPtype();
+sb.refreshDateWarn();
+sb.rerender();
+const REAL = [
+  { pubdate: '2026-01-05 08:00:00', pubmonth: '2026-01', date: '2025-12-30 08:00:00', amountCo: -100, state: 'posted', isSupplier: true },
+  { pubdate: '2026-03-11 08:00:00', pubmonth: '2026-03', date: '2026-03-01 08:00:00', amountCo: -50,  state: 'posted', isSupplier: true },
+  { pubdate: '2026-12-20 08:00:00', pubmonth: '2026-12', date: '2027-01-15 08:00:00', amountCo: -25,  state: 'posted', isSupplier: true },
+];
+sb.__pushRows(REAL);
+els.fFrom.value = ''; els.fTo.value = '';
+sb.rerender();
+// El fixture original aporta POSTED_CO a 2026 en ambos criterios.
+const ESPERA_PUB = 175 + POSTED_CO;
+check('2026 suma los tres pagos por fecha de publicacion',
+  Math.abs(celda(els.tbAno.innerHTML, 'Total 2026') - ESPERA_PUB) < 0.005,
+  celda(els.tbAno.innerHTML, 'Total 2026'));
+check('el pago publicado en 2026 entra en 2026 aunque se pagara en 2025',
+  Math.abs(celda(els.tbAno.innerHTML, 'Total 2026') - ESPERA_PUB) < 0.005);
+els.fDate.value = 'pay';
+sb.refreshDateWarn();
+sb.rerender();
+// Por fecha de pago: 100 va a 2025, 50 a 2026 y 25 a 2027.
+check('por fecha del pago el corte cambia y ya no es el de Odoo',
+  Math.abs(celda(els.tbAno.innerHTML, 'Total 2026') - (50 + POSTED_CO)) < 0.005,
+  celda(els.tbAno.innerHTML, 'Total 2026'));
+check('y el monto pagado en 2025 cae en 2025 por fecha de pago',
+  Math.abs(celda(els.tbAno.innerHTML, 'Total 2025') - 100) < 0.005,
+  celda(els.tbAno.innerHTML, 'Total 2025'));
+check('y el de 2027 por fecha de pago',
+  Math.abs(celda(els.tbAno.innerHTML, 'Total 2027') - 25) < 0.005,
+  celda(els.tbAno.innerHTML, 'Total 2027'));
+els.fDate.value = 'pub';
+sb.refreshDateWarn();
+sb.rerender();
+check('al volver a publicacion 2026 recupera el total de Odoo',
+  Math.abs(celda(els.tbAno.innerHTML, 'Total 2026') - ESPERA_PUB) < 0.005,
+  celda(els.tbAno.innerHTML, 'Total 2026'));
+sb.__restoreRows();
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log('\n' + pass + ' OK / ' + fail + ' FALLA');

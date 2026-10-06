@@ -436,6 +436,7 @@ HTML = r"""<!DOCTYPE html>
   .hint { color:#8892a8; font-size:11.5px; margin:0 0 10px; }
   .chart-box { position:relative; height:330px; }
   .tw { max-height:560px; overflow-y:auto; }
+  .alerta { color:#a4262c; }
   table .r { text-align:right; font-variant-numeric:tabular-nums; }
   table tr.sub td { background:#f6f8fc; border-top:2px solid #d7deee; }
   table tr.tot td { background:#213C83; color:#fff; font-weight:700; }
@@ -879,6 +880,9 @@ function resetExpansion() {
 function rerender() { resetExpansion(); render(); }
 
 const state = { rows: [], total: 0, count: 0 };
+// Avisos de carga (fechas imposibles, pagos sin fecha). Se reconstruyen al
+// cambiar el criterio de fecha, asi que se guardan aparte del aviso de fecha.
+let AVISOS_BASE = '';
 
 function render() {
   const rows = filtered();
@@ -963,11 +967,17 @@ function renderPorAno(rows) {
   const nom = baseSupplier() ? 'Gastoslb (proveedores)'
            : baseCustomer() ? 'inglb (clientes)' : 'flujo de pagos';
   document.getElementById('hAno').textContent = 'Cierre por ano y mes — ' + nom;
-  document.getElementById('anoHint').textContent =
-    'Agrupado por ' + (usePubDate() ? 'fecha de publicacion' : 'fecha del pago') +
-    ' (ano / mes), igual que el favorito en Odoo. ' +
-    (sinFecha ? sinFecha + ' pago(s) sin fecha quedan fuera de los meses y se listan al final.'
-              : 'Todos los pagos tienen fecha.');
+  document.getElementById('anoHint').innerHTML = usePubDate()
+    ? 'Agrupado por <b>fecha de publicacion</b> (ano / mes), el mismo criterio con el que ' +
+      'Odoo agrupa los favoritos inglb y Gastoslb. ' +
+      (sinFecha ? sinFecha + ' pago(s) sin fecha quedan fuera de los cortes por mes y se listan al final.'
+                : 'Todos los pagos tienen fecha.')
+    : '<b class="alerta">Estas cifras usan la fecha del pago, no la de publicacion.</b> ' +
+      'Odoo agrupa los favoritos inglb y Gastoslb por fecha de publicacion, asi que los ' +
+      'totales por ano <b>no coincidiran</b> con el listado de Odoo. ' +
+      'Vuelve a "Fecha de publicacion" para comparar. ' +
+      (sinFecha ? sinFecha + ' pago(s) sin fecha quedan fuera de los cortes por mes y se listan al final.'
+                : 'Todos los pagos tienen fecha.');
   document.getElementById('sub').textContent =
     granN + ' pagos · ' + money(granTotal);
 }
@@ -1420,8 +1430,22 @@ function exportCsv() {
   a.click();
 }
 
+// Los dos favoritos de Odoo agrupan por x_fecha_de_publicacion. Si el panel
+// pasa a la fecha del pago, el corte por ano/mes deja de ser comparable con Odoo
+// y se avisa en vez de dejar que las cifras parezcan un dato de Odoo.
+function refreshDateWarn() {
+  const w = document.getElementById('warn');
+  const msg = '<b class="alerta">Ojo:</b> estas cifras usan la <b>fecha del pago</b>. ' +
+    'Los favoritos inglb y Gastoslb de Odoo agrupan por <b>fecha de publicacion</b>, ' +
+    'asi que los totales por ano y mes no coincidiran con el listado de Odoo.';
+  w.innerHTML = (usePubDate() ? '' : msg + '<br>') + AVISOS_BASE;
+}
+
 ['fFrom', 'fTo', 'fState', 'fCur', 'fComp', 'fNeg', 'fBase', 'fDate'].forEach(id => {
-  document.getElementById(id).addEventListener('change', rerender);
+  document.getElementById(id).addEventListener('change', function () {
+    refreshDateWarn();
+    rerender();
+  });
 });
 document.getElementById('fMeasure').addEventListener('change', toggleMeasure);
 // Cambiar el tipo de pago reajusta la base y vuelve a dibujar.
@@ -1454,11 +1478,13 @@ document.getElementById('fTop').addEventListener('change', rerender);
       '. Siguen visibles con el interruptor "Incluir pagos sin fecha" y quedan ' +
       'fuera de los cortes por mes. No se modifica Odoo: se reportan aparte.';
   }
+  AVISOS_BASE = avisos;
   document.getElementById('warn').innerHTML = avisos;
 
   syncMeasureUI();
   syncBaseWithPtype();
   render();
+  refreshDateWarn();
 })();
 </script>
 </body>
