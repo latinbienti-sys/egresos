@@ -1487,15 +1487,8 @@ document.getElementById('fNoDate').addEventListener('change', rerender);
     avisos += '<b>Ojo:</b> ' + bad + ' pago(s) tienen una fecha imposible (anio muy lejano). ' +
       'Quedan fuera del rango por defecto para no distorsionar el historico.<br>';
   }
-  // Los pagos sin fecha no se corrigen en Odoo: el panel los conserva y los
-  // declara aparte para que la decision sea de quien consulta.
-  const sinFecha = ROWS.filter(r => !rowDate(r)).length;
-  if (sinFecha) {
-    avisos += '<b>Ojo:</b> ' + sinFecha + ' pago(s) no tienen ' +
-      (usePubDate() ? 'fecha de publicacion' : 'fecha de pago') +
-      '. Siguen visibles con el interruptor "Incluir pagos sin fecha" y quedan ' +
-      'fuera de los cortes por mes. No se modifica Odoo: se reportan aparte.';
-  }
+  // Los pagos sin fecha ya se declaran en la tarjeta de corte por ano/mes y en
+  // su propio KPI, asi que no se repiten como aviso general al cargar.
   AVISOS_BASE = avisos;
   document.getElementById('warn').innerHTML = avisos;
 
