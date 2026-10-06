@@ -73,8 +73,11 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # El HTML generado no se pierde al cambiar de rama: se aparta primero.
+          # El HTML generado se aparta y el archivo del arbol se restaura: si
+          # queda modificado, git se niega a cambiar de rama y publicacion falla.
           cp gastos_razon_pagos.html "$RUNNER_TEMP/panel.html"
+          git checkout -- gastos_razon_pagos.html
+          git status --porcelain -- gastos_razon_pagos.html
           git fetch origin gh-pages
           git checkout -B gh-pages origin/gh-pages
           git reset --hard origin/gh-pages
