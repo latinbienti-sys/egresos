@@ -1116,6 +1116,19 @@ function renderChips(byReason, total) {
 // Componentes del ingreso, con el criterio del favorito "inglb":
 //   ventas + anticipos - descuentos/devoluciones = ingreso neto
 // El signo se fuerza con Math.abs porque en Odoo los descuentos llegan positivos.
+// Totales por favorito dentro de un conjunto de filas ya filtrado. Reproduce
+// exactamente el conjunto de "Salidas" (Gastoslb: isSupplier) y el de
+// "Entradas" (inglb: isCustomer), para poder comparar en "Ambos".
+function baseTotals(rows) {
+  let egresos = 0, ingresos = 0, nEg = 0, nIng = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.isSupplier) { egresos += val(r); nEg++; }
+    else if (r.isCustomer) { ingresos += val(r); nIng++; }
+  }
+  return { egresos: egresos, ingresos: ingresos, nEg: nEg, nIng: nIng };
+}
+
 function breakdown(rows) {
   const co = isCo();
   const cust = baseCustomer();
@@ -1183,8 +1196,15 @@ function renderKpis(rows, byReason, total) {
                    : esEgreso ? 'Total de egresos'
                    : esIngreso ? 'Total de ingresos' : 'Total analizado';
   const rotuloMayor = esIngreso ? 'Mayor ingreso' : 'Mayor gasto';
+  // En "Ambos" se separan los dos totales para poder contrastarlos con lo que
+  // muestra cada base por su cuenta: mismo conjunto de Salidas y de Entradas.
+  const par = (pt === 'all' && !baseSupplier()) ? baseTotals(rows) : null;
   html =
     card(rotuloTotal, money(total), rows.length + ' registros') +
+    (par ? card('Total de egresos', money(par.egresos),
+                par.nEg + ' pagos · coincide con Salidas (Gastoslb)') +
+           card('Total de ingresos', money(par.ingresos),
+                par.nIng + ' pagos · coincide con Entradas (inglb)') : '') +
     card('Ticket promedio', money(avg), 'por pago') +
     card('Categorías', byReason.length, 'en ' + M.reason_label) +
     (top ? card(rotuloMayor, money(top.value),

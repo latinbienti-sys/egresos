@@ -50,13 +50,14 @@ El panel muestra **solo pagos publicados** en las dos bases. Por eso, en Entrada
 
 - KPIs: total analizado, ticket promedio, nº de categorías, mayor gasto.
 - Ingresos de clientes: ventas + anticipos − descuentos = ingreso neto.
+- En **Ambos** (tipo de pago) se desdoblan dos tarjetas: **Total de egresos** y **Total de ingresos**. Son exactamente los mismos conjuntos que muestra cada base por su cuenta (Gastoslb e inglb), así el total de egresos coincide con el de Salidas y el de ingresos con el de Entradas, con la suma completa de la columna igual que la reporta Odoo.
 - Cierre por año y mes: tabla agrupada por año / mes con subtotal por año y total general, igual que el agrupamiento `x_fecha_de_publicacion:year` / `:month` de los favoritos en Odoo. Los pagos sin fecha se listan aparte al final.
 - Histórico año-mes: barras apiladas por razón de pago (un solo eje). Clic en un bloque para filtrar.
 - Dona: distribución por razón. Clic para filtrar tabla e histórico.
 - Desglose 3 niveles: Razón de pago → Proveedor → Documento (subtotales, %, barras). Expandible/colapsable.
 - Filtros en vivo: fechas, estado (Publicado/Borrador/Todos), tipo (Salidas/Entradas/Ambos), base (Clientes/Proveedores/Flujo de pagos), casilla de pagos sin fecha, fecha usada (Publicación/Pago), medida (Moneda de compañía/Moneda del pago), moneda (VEF/USD), compañía, signo contable.
 - Atajos: Este mes / Este año / Todo. Exportar CSV.
-- Predeterminado: Publicado + Clientes, moneda de compañía (USD). Multicompañía y multimoneda.
+- Predeterminado: Publicado + Salidas (base Proveedores, Gastoslb) + fecha de publicación, moneda de compañía (USD). El selector de tipo manda sobre la base: Salidas → Proveedores, Entradas → Clientes, Ambos → Flujo de pagos. Multicompañía y multimoneda.
 
 ## Ingresos de clientes (favorito "inglb")
 
@@ -111,6 +112,6 @@ node test_ingresos_clientes.js
 node test_sync_incremental.js
 ```
 
-170 pruebas (90 de agregación, filtros, histórico año-mes, drill-down de 3 niveles y escapes;
-62 de la base de ingresos de clientes contra los datos reales; 18 de la descarga
-incremental). No conectan a Odoo.
+178 pruebas (90 de agregación, filtros, histórico año-mes, drill-down de 3 niveles y escapes;
+70 de la base de ingresos de clientes contra los datos reales, incluido el cruce de
+los totales de Ambos con Salidas y Entradas; 18 de la descarga incremental). No conectan a Odoo.

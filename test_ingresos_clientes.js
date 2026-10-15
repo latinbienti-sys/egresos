@@ -200,6 +200,56 @@ check('las salidas nunca traen monto positivo (convencion contable)',
 check('las entradas nunca traen monto negativo',
   ambos.filter(r => r.ptype === 'inbound').every(r => (r.amountCo || 0) >= 0));
 
+console.log('\nTotales por base en "Ambos"');
+// El HTML de las tarjetas KPI es <div class="kpi"><span>rotulo</span><b>valor</b><small>nota</small></div>.
+function kpiVal(html, label) {
+  const re = new RegExp('<span>' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
+    '</span><b>(.*?)</b>');
+  const m = html.match(re);
+  return m ? m[1] : null;
+}
+function kpiNote(html, label) {
+  const re = new RegExp('<span>' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
+    '</span><b>.*?</b><small>(.*?)</small>');
+  const m = html.match(re);
+  return m ? m[1] : '';
+}
+
+// Ambos: se muestran los dos totales por separado.
+els.fPtype.value = 'all';
+run('syncBaseWithPtype()');
+run('render();');
+let kA = els.kpis.innerHTML;
+const ambosEg = kpiVal(kA, 'Total de egresos');
+const ambosIng = kpiVal(kA, 'Total de ingresos');
+check('"Ambos" muestra el total de egresos', ambosEg !== null, ambosEg);
+check('"Ambos" muestra el total de ingresos', ambosIng !== null, ambosIng);
+check('"Ambos" dice que el egreso coincide con Salidas (Gastoslb)',
+  kpiNote(kA, 'Total de egresos').includes('Salidas (Gastoslb)'),
+  kpiNote(kA, 'Total de egresos'));
+check('"Ambos" dice que el ingreso coincide con Entradas (inglb)',
+  kpiNote(kA, 'Total de ingresos').includes('Entradas (inglb)'),
+  kpiNote(kA, 'Total de ingresos'));
+
+// Salidas: su propio total, con el dominio del favorito Gastoslb.
+els.fPtype.value = 'outbound';
+run('syncBaseWithPtype()');
+run('render();');
+const salidasTotal = kpiVal(els.kpis.innerHTML, 'Total de egresos (Gastoslb)');
+check('Salidas rotula su total como Gastoslb', salidasTotal !== null, salidasTotal);
+
+// Entradas: el total de la columna (mismo criterio que Odoo y el cierre anual).
+els.fPtype.value = 'inbound';
+run('syncBaseWithPtype()');
+run('render();');
+const entradasTotal = run('money(state.total)');
+check('Entradas tiene un total de columna', typeof entradasTotal === 'string', entradasTotal);
+
+check('el total de egresos de "Ambos" coincide con Salidas',
+  ambosEg === salidasTotal, ambosEg + ' vs ' + salidasTotal);
+check('el total de ingresos de "Ambos" coincide con Entradas',
+  ambosIng === entradasTotal, ambosIng + ' vs ' + entradasTotal);
+
 // Volver a Entradas debe devolver el criterio de clientes.
 els.fPtype.value = 'inbound';
 run('syncBaseWithPtype()');
