@@ -134,12 +134,15 @@ check('el total de ingresos ignora los descuentos',
   near(descNeg.bruto, 1000), descNeg.bruto);
 
 console.log('\nFiltro por rango de fecha');
+// La fecha de publicacion trae hora, asi que el extremo superior se fija al
+// ultimo segundo del dia: asi el rango cubre octubre completo, incluido el 31.
 els.fFrom.value = '2026-10-01';
-els.fTo.value = '2026-10-31';
+els.fTo.value = '2026-10-31 23:59:59';
 run('render();');
 const oct = run('breakdown(filtered())');
 const octRows = run('filtered().length');
-const octAll = ROWS.filter(r => r.isCustomer && r.state === 'posted' && r.pubmonth === '2026-10');
+const octAll = ROWS.filter(r => r.isCustomer && r.state === 'posted' &&
+  r.pubdate >= '2026-10-01' && r.pubdate <= '2026-10-31 23:59:59');
 check('el rango de octubre acota los registros', octRows === octAll.length,
   octRows + ' vs ' + octAll.length);
 check('los registros sin fecha de publicacion quedan fuera del rango',
