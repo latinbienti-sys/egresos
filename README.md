@@ -55,7 +55,7 @@ El panel muestra **solo pagos publicados** en las dos bases. Por eso, en Entrada
 - Histórico año-mes: barras apiladas por razón de pago (un solo eje). Clic en un bloque para filtrar.
 - Dona: distribución por razón. Clic para filtrar tabla e histórico.
 - Desglose 3 niveles: Razón de pago → Proveedor → Documento (subtotales, %, barras). Expandible/colapsable.
-- Filtros en vivo: fechas, estado (Publicado/Borrador/Todos), tipo (Salidas/Entradas/Ambos), base (Clientes/Proveedores/Flujo de pagos), casilla de pagos sin fecha, fecha usada (Publicación/Pago), medida (Moneda de compañía/Moneda del pago), moneda (VEF/USD), compañía, signo contable.
+- Filtros en vivo: fechas, estado (Publicado/Borrador/Todos), tipo (Salidas/Entradas/Ambos), base (Clientes/Proveedores/Flujo de pagos), casilla de pagos sin fecha, fecha usada (Publicación/Pago), medida (Moneda de compañía/Moneda del pago), moneda (VEF/USD), compañía, signo contable. El extremo superior del rango incluye el día completo aunque la fecha se elija sin hora.
 - Atajos: Este mes / Este año / Todo. Exportar CSV.
 - Predeterminado: Publicado + Salidas (base Proveedores, Gastoslb) + fecha de publicación, moneda de compañía (USD). El selector de tipo manda sobre la base: Salidas → Proveedores, Entradas → Clientes, Ambos → Flujo de pagos. Multicompañía y multimoneda.
 
@@ -112,6 +112,6 @@ node test_ingresos_clientes.js
 node test_sync_incremental.js
 ```
 
-178 pruebas (90 de agregación, filtros, histórico año-mes, drill-down de 3 niveles y escapes;
-70 de la base de ingresos de clientes contra los datos reales, incluido el cruce de
-los totales de Ambos con Salidas y Entradas; 18 de la descarga incremental). No conectan a Odoo.
+179 pruebas (90 de agregación, filtros, histórico año-mes, drill-down de 3 niveles y escapes;
+71 de la base de ingresos de clientes contra los datos reales, incluido el cruce de
+los totales de Ambos con Salidas y Entradas y el día final del rango; 18 de la descarga incremental). No conectan a Odoo.

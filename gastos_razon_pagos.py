@@ -887,7 +887,11 @@ function filtered() {
         if (!document.getElementById('fNoDate').checked) return false;
       } else {
         if (from && d < from) return false;
-        if (to && d > to) return false;
+        // El campo de fecha entrega "YYYY-MM-DD" sin hora, pero las fechas de
+        // publicacion traen hora: si el extremo superior no la trae se compara
+        // solo el dia, de modo que el ultimo dia del rango entre completo
+        // (antes se perdian, por ejemplo, los pagos del 31 de octubre).
+        if (to && (to.length === 10 ? d.slice(0, 10) > to : d > to)) return false;
       }
     }
     if (st !== 'all' && r.state !== st) return false;
