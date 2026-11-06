@@ -614,10 +614,13 @@ HTML = r"""<!DOCTYPE html>
       <input type="checkbox" id="fNoDate" checked> Incluir pagos sin fecha
     </label>
     <div class="quick">
+      <button class="btn" onclick="setPreset('today')">Hoy</button>
       <button class="btn" onclick="setPreset('month')">Este mes</button>
       <button class="btn" onclick="setPreset('year')">Este año</button>
       <button class="btn" onclick="setPreset('all')">Todo</button>
       <button class="btn p" onclick="exportCsv()">Exportar CSV</button>
+      <button class="btn p" onclick="reporteDia()"
+        title="Resumen del dia en PDF: ingresos, anticipos, egresos y pagos publicados">Reporte del día (PDF)</button>
     </div>
     <div class="note" id="note"></div>
     <div class="chips" id="chips"></div>
@@ -1531,6 +1534,10 @@ function setPreset(kind) {
   if (kind === 'all') {
     document.getElementById('fFrom').value = dates[0] || '';
     document.getElementById('fTo').value = dates[dates.length - 1] || '';
+  } else if (kind === 'today') {
+    const hoy = localDay(new Date());
+    document.getElementById('fFrom').value = hoy;
+    document.getElementById('fTo').value = hoy;
   } else {
     const now = new Date();
     const y = now.getFullYear();
@@ -1539,6 +1546,193 @@ function setPreset(kind) {
     document.getElementById('fTo').value = kind === 'month' ? y + '-' + m + '-31' : y + '-12-31';
   }
   rerender();
+}
+
+// ---- Reporte del dia (PDF) ---------------------------------------------
+// Solo lee los datos ya cargados en el panel: no consulta ni modifica Odoo.
+// Dia en hora local, "YYYY-MM-DD".
+function localDay(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+         String(d.getDate()).padStart(2, '0');
+}
+// La fecha de publicacion llega de Odoo en UTC ("2026-11-05 22:10:56"): se pasa
+// a hora local para que lo publicado de noche no caiga en el dia siguiente.
+function pubLocalDay(r) {
+  const p = r.pubdate || '';
+  if (p.length < 10) return '';
+  if (p.length < 16) return p.slice(0, 10);
+  const d = new Date(p.replace(' ', 'T') + 'Z');
+  return isNaN(d) ? p.slice(0, 10) : localDay(d);
+}
+// Dia del reporte: el elegido si Desde = Hasta; si no, hoy.
+function diaReporte() {
+  const f = document.getElementById('fFrom').value;
+  const t = document.getElementById('fTo').value;
+  return (f && f === t) ? f : localDay(new Date());
+}
+const ESTADO_NOMBRE = { posted: 'Publicado', draft: 'Borrador', waiting_approval: 'En aprobación',
+                        cancel: 'Cancelado', rejected: 'Rechazado' };
+function estadoNombre(s) { return ESTADO_NOMBRE[s] || s || '(sin estado)'; }
+
+function resumenDia(dia) {
+  const comp = document.getElementById('fComp').value;
+  const coCur = (function () {
+    if (comp) { const r = ROWS.find(x => x.comp === comp); if (r && r.curCo) return r.curCo; }
+    return (M.company_currencies.length === 1 ? M.company_currencies[0] : 'USD');
+  })();
+  // Siempre en moneda de compania y en positivo, como los totales del panel.
+  const v = r => Math.abs(r.amountCo === null || r.amountCo === undefined ? r.amount : r.amountCo);
+  const delDia = ROWS.filter(r => (!comp || r.comp === comp) && (r.isCustomer || r.isSupplier) &&
+                                  (pubLocalDay(r) === dia || (r.date || '').slice(0, 10) === dia));
+  const pub = delDia.filter(r => r.state === 'posted' && pubLocalDay(r) === dia);
+
+  // Ingresos: criterio inglb (ventas + anticipos + otros - descuentos).
+  const ing = { ventas: 0, anticipos: 0, otros: 0, desc: 0, n: 0, nV: 0, nA: 0, nO: 0, nD: 0 };
+  pub.filter(r => r.isCustomer).forEach(r => {
+    const x = v(r); ing.n++;
+    if (isDiscountReason(r)) { ing.desc += x; ing.nD++; }
+    else if (isAnticipo(r)) { ing.anticipos += x; ing.nA++; }
+    else if (isVenta(r)) { ing.ventas += x; ing.nV++; }
+    else { ing.otros += x; ing.nO++; }
+  });
+  ing.bruto = ing.ventas + ing.anticipos + ing.otros;
+  ing.neto = ing.bruto - ing.desc;
+
+  // Egresos: criterio Gastoslb (proveedores publicados), agrupados por razon.
+  const egRows = pub.filter(r => r.isSupplier).sort((a, b) => v(b) - v(a));
+  const egTotal = egRows.reduce((a, r) => a + v(r), 0);
+  const porRazon = new Map();
+  egRows.forEach(r => {
+    if (!porRazon.has(r.reason)) porRazon.set(r.reason, { razon: r.reason, monto: 0, n: 0 });
+    const g = porRazon.get(r.reason); g.monto += v(r); g.n++;
+  });
+
+  // Control de publicacion: pagos con FECHA DEL PAGO en el dia (los que se
+  // hicieron ese dia) y cuantos de ellos ya estan publicados. Un pago hecho hoy
+  // puede publicarse otro dia, por eso no se mide con la fecha de publicacion.
+  const control = lado => {
+    const set = delDia.filter(r => (lado === 'eg' ? r.isSupplier : r.isCustomer) &&
+                                   (r.date || '').slice(0, 10) === dia);
+    const est = {};
+    let monto = 0, montoPub = 0;
+    set.forEach(r => {
+      est[r.state] = (est[r.state] || 0) + 1;
+      monto += v(r);
+      if (r.state === 'posted') montoPub += v(r);
+    });
+    const pendientes = set.filter(r => r.state !== 'posted');
+    return { total: set.length, publicados: est.posted || 0, est: est, pendientes: pendientes,
+             monto: monto, montoPub: montoPub };
+  };
+
+  return { dia: dia, comp: comp, cur: coCur, ing: ing, egRows: egRows, egTotal: egTotal,
+           porRazon: Array.from(porRazon.values()).sort((a, b) => b.monto - a.monto),
+           ctlEg: control('eg'), ctlIng: control('ing'), v: v };
+}
+
+function reporteDia() {
+  const R = resumenDia(diaReporte());
+  const m = x => fmt(x, R.cur);
+  const e = escapeHtml;
+  const [yy, mm, dd] = R.dia.split('-');
+  const fechaTxt = dd + '/' + mm + '/' + yy;
+  const p = (a, b) => b ? (a / b * 100).toFixed(1) + '%' : '0.0%';
+  const balance = R.ing.neto - R.egTotal;
+
+  const estados = ctl => Object.keys(ctl.est).sort().map(s =>
+    '<span class="pill ' + (s === 'posted' ? 'ok' : 'pend') + '">' + e(estadoNombre(s)) + ': ' +
+    ctl.est[s] + '</span>').join(' ');
+  const ctlBox = (titulo, ctl) =>
+    '<div class="ctl"><h4>' + titulo + '</h4>' +
+    '<div class="big">' + ctl.publicados + ' de ' + ctl.total + ' publicados</div>' +
+    '<div>' + (estados(ctl) || 'Sin pagos con fecha de este día') + '</div>' +
+    (ctl.total ? '<div style="margin-top:4px;color:#666">Monto: ' + m(ctl.monto) + ' · publicado: ' +
+                 m(ctl.montoPub) + '</div>' : '') + '</div>';
+  const pendTabla = list => !list.length ? '' :
+    '<table><thead><tr><th>Documento</th><th>Tipo</th><th>Socio</th><th>Razón</th><th>Estado</th>' +
+    '<th class="r">Monto</th></tr></thead><tbody>' +
+    list.map(r => '<tr><td>' + e(r.doc) + '</td><td>' + (r.isSupplier ? 'Egreso' : 'Ingreso') +
+      '</td><td>' + e(r.partner) + '</td><td>' + e(r.reason) + '</td><td>' + e(estadoNombre(r.state)) +
+      '</td><td class="r">' + m(R.v(r)) + '</td></tr>').join('') + '</tbody></table>';
+
+  const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">' +
+  '<title>Reporte diario ' + fechaTxt + '</title><style>' +
+  '@page{size:A4;margin:14mm}*{box-sizing:border-box}' +
+  'body{font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;margin:0;font-size:12px}' +
+  '.head{background:#213C83;color:#fff;padding:14px 18px;border-radius:8px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+  '.head h1{margin:0;font-size:19px}.head p{margin:3px 0 0;color:#cbd5e8;font-size:11px}' +
+  'h2{color:#213C83;font-size:14px;margin:18px 0 6px;border-bottom:2px solid #d7deee;padding-bottom:3px}' +
+  '.kp{display:flex;gap:8px;flex-wrap:wrap}.k{flex:1;min-width:120px;border:1px solid #d7deee;border-radius:8px;padding:8px 10px}' +
+  '.k span{font-size:10px;color:#666;display:block}.k b{font-size:16px}.k small{display:block;color:#999;font-size:10px}' +
+  '.k.neg b{color:#a4262c}.k.pos b{color:#047857}' +
+  'table{width:100%;border-collapse:collapse;margin-top:4px}th{background:#f0f3fa;color:#213C83;text-align:left;' +
+  'font-size:10px;text-transform:uppercase;padding:5px 7px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+  'td{padding:4px 7px;border-bottom:1px solid #eef1f8}.r{text-align:right;white-space:nowrap}' +
+  'tr.tot td{font-weight:700;border-top:2px solid #213C83}tr{page-break-inside:avoid}' +
+  '.ctls{display:flex;gap:10px}.ctl{flex:1;border:1px solid #d7deee;border-radius:8px;padding:8px 10px}' +
+  '.ctl h4{margin:0 0 4px;font-size:11px;color:#666;text-transform:uppercase}.big{font-size:17px;font-weight:700;color:#213C83;margin-bottom:4px}' +
+  '.pill{display:inline-block;border-radius:10px;padding:1px 8px;font-size:10.5px;font-weight:700;margin:2px 2px 0 0;' +
+  '-webkit-print-color-adjust:exact;print-color-adjust:exact}.pill.ok{background:#d1fae5;color:#065f46}.pill.pend{background:#fef3c7;color:#92400e}' +
+  '.nota{color:#8892a8;font-size:10px;margin-top:16px}.vacio{color:#999;padding:6px 0}' +
+  '.bar{height:5px;background:#eef1f8;border-radius:3px}.bar i{display:block;height:100%;background:#213C83;border-radius:3px;' +
+  '-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+  '.noprint{margin:10px 0;text-align:right}@media print{.noprint{display:none}}' +
+  '.noprint button{background:#213C83;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-weight:700;cursor:pointer}' +
+  '</style></head><body>' +
+  '<div class="noprint"><button onclick="window.print()">Guardar como PDF / Imprimir</button></div>' +
+  '<div class="head"><h1>Reporte diario de caja — ' + fechaTxt + '</h1>' +
+  '<p>' + (R.comp ? e(R.comp) + ' · ' : 'Todas las compañías · ') + 'Montos en ' + e(R.cur) +
+  ' (moneda de compañía) · Solo pagos publicados · Datos del panel generado ' + e(M.generated) + '</p></div>' +
+
+  '<h2>Resumen del día</h2><div class="kp">' +
+  '<div class="k"><span>Ingresos por ventas</span><b>' + m(R.ing.ventas) + '</b><small>' + R.ing.nV + ' pagos</small></div>' +
+  '<div class="k"><span>Anticipos de clientes</span><b>' + m(R.ing.anticipos) + '</b><small>' + R.ing.nA + ' pagos</small></div>' +
+  (R.ing.otros ? '<div class="k"><span>Otros ingresos</span><b>' + m(R.ing.otros) + '</b><small>' + R.ing.nO + ' pagos</small></div>' : '') +
+  '<div class="k"><span>Descuentos y devoluciones</span><b>-' + m(R.ing.desc) + '</b><small>' + R.ing.nD + ' pagos</small></div>' +
+  '<div class="k pos"><span>Ingreso neto</span><b>' + m(R.ing.neto) + '</b><small>ventas + anticipos - descuentos</small></div>' +
+  '<div class="k neg"><span>Egresos</span><b>' + m(R.egTotal) + '</b><small>' + R.egRows.length + ' pagos publicados</small></div>' +
+  '<div class="k ' + (balance >= 0 ? 'pos' : 'neg') + '"><span>Balance del día</span><b>' + m(balance) +
+  '</b><small>' + (balance >= 0 ? 'Superávit' : 'Déficit') + '</small></div></div>' +
+
+  '<h2>Pagos hechos el día vs. publicados</h2><div class="ctls">' +
+  ctlBox('Egresos (pagos a proveedores)', R.ctlEg) + ctlBox('Ingresos (cobros a clientes)', R.ctlIng) + '</div>' +
+  (R.ctlEg.pendientes.length || R.ctlIng.pendientes.length
+    ? '<p style="margin:8px 0 0;font-weight:700;color:#92400e">Pagos del día sin publicar</p>' +
+      pendTabla(R.ctlEg.pendientes.concat(R.ctlIng.pendientes))
+    : '<p class="vacio">Todos los pagos del día están publicados.</p>') +
+
+  '<h2>¿En qué se fueron los egresos?</h2>' +
+  (R.porRazon.length
+    ? '<table><thead><tr><th>Razón de pago</th><th class="r">Pagos</th><th class="r">Monto</th><th class="r">%</th>' +
+      '<th style="width:22%"></th></tr></thead><tbody>' +
+      R.porRazon.map(g => '<tr><td>' + e(g.razon) + '</td><td class="r">' + g.n + '</td><td class="r">' +
+        m(g.monto) + '</td><td class="r">' + p(g.monto, R.egTotal) + '</td><td><div class="bar"><i style="width:' +
+        (R.egTotal ? g.monto / R.egTotal * 100 : 0).toFixed(1) + '%"></i></div></td></tr>').join('') +
+      '<tr class="tot"><td>Total egresos</td><td class="r">' + R.egRows.length + '</td><td class="r">' +
+      m(R.egTotal) + '</td><td class="r">100.0%</td><td></td></tr></tbody></table>'
+    : '<p class="vacio">Sin egresos publicados en el día.</p>') +
+
+  (R.egRows.length
+    ? '<h2>Detalle de egresos publicados</h2><table><thead><tr><th>Documento</th><th>Proveedor</th>' +
+      '<th>Razón</th><th class="r">Monto</th></tr></thead><tbody>' +
+      R.egRows.map(r => '<tr><td>' + e(r.doc) + '</td><td>' + e(r.partner) + '</td><td>' + e(r.reason) +
+        '</td><td class="r">' + m(R.v(r)) + '</td></tr>').join('') +
+      '<tr class="tot"><td colspan="3">Total</td><td class="r">' + m(R.egTotal) + '</td></tr></tbody></table>'
+    : '') +
+
+  '<p class="nota">Ingresos: favorito inglb (clientes, sin transferencias internas). Egresos: favorito Gastoslb ' +
+  '(proveedores, sin transferencias internas). Los montos cuentan solo pagos publicados con fecha de publicación ' +
+  'del día (hora local), igual que el panel y los favoritos de Odoo. "Pagos hechos el día" cuenta los pagos con ' +
+  'fecha de pago del día en cualquier estado; un pago hecho hoy puede publicarse otro día. ' +
+  'Reporte de solo lectura: no se modificó nada en Odoo.</p>' +
+  '</body></html>';
+
+  const w = window.open('', '_blank');
+  if (!w) { alert('El navegador bloqueó la ventana del reporte. Permite ventanas emergentes para este sitio.'); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+  setTimeout(function () { try { w.focus(); w.print(); } catch (_) {} }, 400);
 }
 
 function exportCsv() {
