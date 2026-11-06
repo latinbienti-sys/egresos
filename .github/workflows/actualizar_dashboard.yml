@@ -9,7 +9,8 @@ on:
     # Cada hora, al minuto 7 para no coincidir con el pico de las 00:00.
     - cron: '7 * * * *'
     # 20:30 Venezuela (UTC-4): cierre de caja + correo.
-    - cron: '30 0 * * *'
+    # PAUSADO mientras se ajusta la plantilla del PDF; reactivar quitando el '#':
+    # - cron: '30 0 * * *'
   workflow_dispatch:
     inputs:
       limite:
