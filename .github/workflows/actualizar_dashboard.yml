@@ -24,6 +24,10 @@ on:
         description: 'Opcional: enviar el correo solo a esta(s) direccion(es), separadas por coma'
         type: string
         default: ''
+      reloj:
+        description: 'Uso interno: disparado por el reloj de Cloudflare (portal-latinbien) a las 20:30'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -47,7 +51,9 @@ jobs:
         run: |
           DIA=$(TZ=America/Caracas date +%F)
           CIERRE=false
-          if [ "${{ github.event.schedule }}" = "30 0 * * *" ]; then
+          # 20:30: lo dispara a tiempo el reloj de Cloudflare; el horario de GitHub queda
+          # de respaldo (el que llegue segundo ve el PDF ya hecho y no lo repite).
+          if [ "${{ github.event.schedule }}" = "30 0 * * *" ] || [ "${{ inputs.reloj }}" = "true" ]; then
             # GitHub a veces demora el horario de las 20:30: si arranca despues de
             # medianoche, el cierre es del dia anterior (hasta las 04:30 de Venezuela).
             DIA=$(TZ=America/Caracas date -d '-8 hours' +%F)
@@ -129,7 +135,7 @@ jobs:
         env:
           DIA: ${{ steps.modo.outputs.dia }}
           CIERRE: ${{ steps.modo.outputs.cierre }}
-          PROGRAMADO: ${{ github.event_name == 'schedule' }}
+          PROGRAMADO: ${{ github.event_name == 'schedule' || inputs.reloj == true }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"

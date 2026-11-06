@@ -1601,35 +1601,47 @@ function resumenDia(dia) {
   const delDia = ROWS.filter(r => (!comp || r.comp === comp) && (r.isCustomer || r.isSupplier) &&
                                   (pubLocalDay(r) === dia || (r.date || '').slice(0, 10) === dia));
   const pub = delDia.filter(r => r.state === 'posted' && pubLocalDay(r) === dia);
+  // Pagado en el dia: fecha de pago del dia, publicado o no (sin cancelados/rechazados).
+  const pag = delDia.filter(r => (r.date || '').slice(0, 10) === dia && r.state !== 'cancel' && r.state !== 'rejected');
 
-  // Ingresos: criterio inglb (ventas + anticipos + otros - descuentos).
-  const ing = { ventas: 0, anticipos: 0, otros: 0, desc: 0, nV: 0, nA: 0, nO: 0, nD: 0 };
-  pub.filter(r => r.isCustomer).forEach(r => {
-    const x = v(r);
-    if (isDiscountReason(r)) { ing.desc += x; ing.nD++; }
-    else if (isAnticipo(r)) { ing.anticipos += x; ing.nA++; }
-    else if (isVenta(r)) { ing.ventas += x; ing.nV++; }
-    else { ing.otros += x; ing.nO++; }
-  });
-  ing.bruto = ing.ventas + ing.anticipos + ing.otros;
-  ing.neto = ing.bruto - ing.desc;
+  // Categoria de un cobro a cliente, con el criterio inglb.
+  const catIng = r => isDiscountReason(r) ? 'desc' : isAnticipo(r) ? 'ant' : isVenta(r) ? 'venta' : 'otros';
 
-  // Egresos: criterio Gastoslb (proveedores publicados), agrupados por razon.
-  const egRows = pub.filter(r => r.isSupplier);
-  const egTotal = egRows.reduce((a, r) => a + v(r), 0);
-  const porRazon = new Map();
-  egRows.forEach(r => {
-    if (!porRazon.has(r.reason)) porRazon.set(r.reason, { razon: r.reason, monto: 0, n: 0 });
-    const g = porRazon.get(r.reason); g.monto += v(r); g.n++;
-  });
+  // Ingresos (criterio inglb: ventas + anticipos + otros - descuentos) y egresos
+  // (criterio Gastoslb, agrupados por razon) de un conjunto de pagos.
+  const resumir = rows => {
+    const ing = { ventas: 0, anticipos: 0, otros: 0, desc: 0, nV: 0, nA: 0, nO: 0, nD: 0 };
+    const ingPorRazon = {};
+    rows.filter(r => r.isCustomer).forEach(r => {
+      const x = v(r);
+      if (isDiscountReason(r)) { ing.desc += x; ing.nD++; }
+      else if (isAnticipo(r)) { ing.anticipos += x; ing.nA++; }
+      else if (isVenta(r)) { ing.ventas += x; ing.nV++; }
+      else { ing.otros += x; ing.nO++; }
+      const k = catIng(r);
+      if (!ingPorRazon[k]) ingPorRazon[k] = {};
+      ingPorRazon[k][r.reason] = (ingPorRazon[k][r.reason] || 0) + 1;
+    });
+    ing.bruto = ing.ventas + ing.anticipos + ing.otros;
+    ing.neto = ing.bruto - ing.desc;
+    const egRows = rows.filter(r => r.isSupplier);
+    const egTotal = egRows.reduce((a, r) => a + v(r), 0);
+    const porRazon = new Map();
+    egRows.forEach(r => {
+      if (!porRazon.has(r.reason)) porRazon.set(r.reason, { razon: r.reason, monto: 0, n: 0 });
+      const g = porRazon.get(r.reason); g.monto += v(r); g.n++;
+    });
+    return { ing: ing, ingPorRazon: ingPorRazon, egN: egRows.length, egTotal: egTotal,
+             balance: ing.neto - egTotal,
+             porRazon: Array.from(porRazon.values()).sort((a, b) => b.monto - a.monto) };
+  };
+  const P = resumir(pub);
 
   // Por lado:
   //   Pagado hoy    = pagos con fecha de pago del dia (sin cancelados/rechazados).
   //   Publicado hoy = pagos publicados con fecha de publicacion del dia, con las
   //                   fechas de pago a las que corresponden.
   //   En espera     = pagos con fecha de pago del dia aun sin publicar.
-  // Categoria de un cobro a cliente, con el criterio inglb.
-  const catIng = r => isDiscountReason(r) ? 'desc' : isAnticipo(r) ? 'ant' : isVenta(r) ? 'venta' : 'otros';
   const control = (lado, cat) => {
     const deLado = r => (lado === 'eg' ? r.isSupplier : r.isCustomer) && (!cat || catIng(r) === cat);
     const b = { pag: [0, 0], pub: [0, 0], esp: [0, 0] };
@@ -1650,19 +1662,14 @@ function resumenDia(dia) {
     return { b: b, fechasPago: Object.keys(fechasPago).sort() };
   };
 
-  const ingPorRazon = {};
-  pub.filter(r => r.isCustomer).forEach(r => {
-    const k = catIng(r);
-    if (!ingPorRazon[k]) ingPorRazon[k] = {};
-    ingPorRazon[k][r.reason] = (ingPorRazon[k][r.reason] || 0) + 1;
-  });
-
-  return { dia: dia, comp: comp, cur: coCur, ing: ing, egN: egRows.length, egTotal: egTotal,
-           ingPorRazon: ingPorRazon,
+  // Publicado en el dia en el nivel superior (ultimos 7 dias); lo pagado en `pag`
+  // (resumen y secciones de la hoja 1).
+  return { dia: dia, comp: comp, cur: coCur, ing: P.ing, egN: P.egN, egTotal: P.egTotal,
+           ingPorRazon: P.ingPorRazon,
            ctlIngCat: { venta: control('ing', 'venta'), ant: control('ing', 'ant'),
                         otros: control('ing', 'otros'), desc: control('ing', 'desc') },
-           balance: ing.neto - egTotal,
-           porRazon: Array.from(porRazon.values()).sort((a, b) => b.monto - a.monto),
+           balance: P.balance, porRazon: P.porRazon,
+           pag: resumir(pag),
            ctlEg: control('eg'), ctlIng: control('ing') };
 }
 
@@ -1687,6 +1694,7 @@ function listaFechas(fechas) {
 // Arma el HTML del cierre de un dia (lo usa el boton y el PDF automatico).
 function htmlReporteDia(dia) {
   const R = resumenDia(dia);
+  const D = R.pag; // lo pagado en el dia: resumen y secciones de la hoja 1
   const m = x => fmt(x, R.cur);
   const e = escapeHtml;
   const fechaTxt = diaSemana(R.dia) + ' ' + ddmm(R.dia) + '/' + R.dia.slice(0, 4);
@@ -1718,7 +1726,7 @@ function htmlReporteDia(dia) {
   const otrasEg = R.ctlEg.fechasPago.filter(f => f !== R.dia);
   if (otrasEg.length) avisos.push('<b>Egresos publicados hoy</b>: corresponden a pagos del ' +
     listaFechas(otrasEg) + '.');
-  if (R.balance < 0) avisos.push('<b>Balance del día</b>: déficit de ' + m(-R.balance) + '.');
+  if (D.balance < 0) avisos.push('<b>Balance del día</b>: déficit de ' + m(-D.balance) + '.');
 
   const kpi = (label, valor, cls) =>
     '<div class="k' + (cls ? ' ' + cls : '') + '"><span>' + label + '</span><b>' + valor + '</b></div>';
@@ -1740,44 +1748,45 @@ function htmlReporteDia(dia) {
     '<td class="c">' + coletilla(ctl) + '</td>' +
     '<td class="r g1">' + (ctl.b.esp[0] ? '<b class="rojo">' + ctl.b.esp[0] + '</b>' : num(0)) + '</td>' +
     '<td class="r">' + (ctl.b.esp[0] ? '<b class="rojo">' + m(ctl.b.esp[1]) + '</b>' : num(0, m)) + '</td></tr>';
-  const maxRazon = R.porRazon.length ? R.porRazon[0].monto : 0;
+  const maxRazon = D.porRazon.length ? D.porRazon[0].monto : 0;
 
   // ¿De donde vinieron los ingresos? ventas, anticipos y descuentos por separado.
-  const razonesDe = k => Object.keys(R.ingPorRazon[k] || {}).sort().map(e).join(', ') || '<span class="z">–</span>';
+  const razonesDe = k => Object.keys(D.ingPorRazon[k] || {}).sort().map(e).join(', ') || '<span class="z">–</span>';
   const catsIng = [
-    ['Ingresos por ventas', 'venta', R.ing.ventas, R.ing.nV, false],
-    ['Anticipos de clientes', 'ant', R.ing.anticipos, R.ing.nA, false],
-    ['Otros ingresos', 'otros', R.ing.otros, R.ing.nO, false],
-    ['Descuentos y devoluciones (restan)', 'desc', R.ing.desc, R.ing.nD, true],
+    ['Ingresos por ventas', 'venta', D.ing.ventas, D.ing.nV, false],
+    ['Anticipos de clientes', 'ant', D.ing.anticipos, D.ing.nA, false],
+    ['Otros ingresos', 'otros', D.ing.otros, D.ing.nO, false],
+    ['Descuentos y devoluciones (restan)', 'desc', D.ing.desc, D.ing.nD, true],
   ].filter(c => c[2] || c[1] === 'venta' || c[1] === 'ant');
   const maxIng = Math.max.apply(null, [0].concat(catsIng.map(c => c[2])));
-  const tablaIngresos = !(R.ing.bruto || R.ing.desc) ? '' :
-    '<h2>¿De dónde vinieron los ingresos? <small>cobros a clientes publicados hoy</small></h2>' +
+  const tablaIngresos = !(D.ing.bruto || D.ing.desc) ? '' :
+    '<h2>¿De dónde vinieron los ingresos? <small>cobros a clientes pagados hoy (fecha de pago)</small></h2>' +
     '<table class="t"><thead><tr><th>Concepto</th><th>Razón de pago en Odoo</th><th class="r">Pagos</th>' +
     '<th class="r">Monto</th><th class="r">% del bruto</th><th style="width:28%"></th></tr></thead><tbody>' +
     catsIng.map(c => '<tr><td class="n"' + (c[4] ? ' style="color:#b91c1c"' : '') + '>' + c[0] + '</td><td class="c">' +
       razonesDe(c[1]) + '</td><td class="r">' + num(c[3]) + '</td><td class="r' + (c[4] ? ' rojo' : '') + '">' +
       (c[2] ? (c[4] ? '-' : '') + m(c[2]) : num(0, m)) + '</td><td class="r">' +
-      (R.ing.bruto ? (c[2] / R.ing.bruto * 100).toFixed(1) : '0.0') + '%</td><td><div class="bar"><i style="width:' +
+      (D.ing.bruto ? (c[2] / D.ing.bruto * 100).toFixed(1) : '0.0') + '%</td><td><div class="bar"><i style="width:' +
       (maxIng ? c[2] / maxIng * 100 : 0).toFixed(1) + '%;background:' + (c[4] ? '#b91c1c' : '#23955a') +
       '"></i></div></td></tr>').join('') +
     '<tr class="tot"><td>Ingreso neto</td><td class="c" style="font-weight:400">ventas + anticipos − descuentos</td>' +
-    '<td class="r">' + (R.ing.nV + R.ing.nA + R.ing.nO + R.ing.nD) + '</td><td class="r">' + m(R.ing.neto) +
+    '<td class="r">' + (D.ing.nV + D.ing.nA + D.ing.nO + D.ing.nD) + '</td><td class="r">' + m(D.ing.neto) +
     '</td><td></td><td></td></tr></tbody></table>';
 
   const hoja1 =
     '<section class="hoja">' + encabezado(1, 2) +
     '<div class="kp">' +
-      kpi('Ingresos por ventas', m(R.ing.ventas)) +
-      kpi('Anticipos de clientes', m(R.ing.anticipos)) +
-      (R.ing.otros ? kpi('Otros ingresos', m(R.ing.otros)) : '') +
-      kpi('Descuentos y devol.', '-' + m(R.ing.desc)) +
-      kpi('Ingreso neto', m(R.ing.neto), 'pos') +
-      kpi('Egresos publicados', m(R.egTotal), 'neg') +
-      kpi('Balance del día', m(R.balance), R.balance >= 0 ? 'pos' : 'neg') +
+      kpi('Ingresos por ventas', m(D.ing.ventas)) +
+      kpi('Anticipos de clientes', m(D.ing.anticipos)) +
+      (D.ing.otros ? kpi('Otros ingresos', m(D.ing.otros)) : '') +
+      kpi('Descuentos y devol.', '-' + m(D.ing.desc)) +
+      kpi('Ingreso neto', m(D.ing.neto), 'pos') +
+      kpi('Egresos pagados', m(D.egTotal), 'neg') +
+      kpi('Balance del día', m(D.balance), D.balance >= 0 ? 'pos' : 'neg') +
       kpi('Pagos en espera', String(R.ctlEg.b.esp[0] + R.ctlIng.b.esp[0]),
           (R.ctlEg.b.esp[0] + R.ctlIng.b.esp[0]) ? 'neg' : '') +
     '</div>' +
+    '<p class="mini" style="margin:-4px 0 8px">Resumen con lo <b>pagado hoy</b> (fecha de pago), incluidos los pagos que aún esperan publicarse.</p>' +
     (avisos.length ? '<div class="rev"><div class="revt">Para revisar</div><ul>' +
       avisos.map(a => '<li>' + a + '</li>').join('') + '</ul></div>' : '') +
 
@@ -1801,27 +1810,34 @@ function htmlReporteDia(dia) {
     'aunque se hayan pagado otro día. <b>En espera</b>: pagados hoy y todavía sin publicar (borrador o en aprobación).</p>' +
 
     tablaIngresos +
-    (R.porRazon.length
-      ? '<h2>¿En qué se fueron los egresos? <small>egresos publicados hoy por razón de pago</small></h2>' +
+    (D.porRazon.length
+      ? '<h2>¿En qué se fueron los egresos? <small>egresos pagados hoy (fecha de pago) por razón de pago</small></h2>' +
         '<table class="t"><thead><tr><th>Razón de pago</th><th class="r">Pagos</th><th class="r">Monto</th>' +
         '<th class="r">%</th><th style="width:38%"></th></tr></thead><tbody>' +
-        R.porRazon.map(g => '<tr><td class="n">' + e(g.razon) + '</td><td class="r">' + g.n + '</td><td class="r">' +
-          m(g.monto) + '</td><td class="r">' + (R.egTotal ? (g.monto / R.egTotal * 100).toFixed(1) : '0.0') +
+        D.porRazon.map(g => '<tr><td class="n">' + e(g.razon) + '</td><td class="r">' + g.n + '</td><td class="r">' +
+          m(g.monto) + '</td><td class="r">' + (D.egTotal ? (g.monto / D.egTotal * 100).toFixed(1) : '0.0') +
           '%</td><td><div class="bar"><i style="width:' + (maxRazon ? g.monto / maxRazon * 100 : 0).toFixed(1) +
           '%"></i></div></td></tr>').join('') +
-        '<tr class="tot"><td>Total egresos</td><td class="r">' + R.egN + '</td><td class="r">' + m(R.egTotal) +
+        '<tr class="tot"><td>Total egresos</td><td class="r">' + D.egN + '</td><td class="r">' + m(D.egTotal) +
         '</td><td class="r">100.0%</td><td></td></tr></tbody></table>'
       : '') +
     pie + '</section>';
 
   // --- Hoja 2: ultimos 7 dias ---------------------------------------------
-  const filasSemana = [
+  // Arriba lo pagado (fecha de pago, igual que la hoja 1); abajo lo publicado como control.
+  const filasPagado = [
+    ['Ingresos por ventas', s => s.pag.ing.ventas, 'a'],
+    ['Anticipos de clientes', s => s.pag.ing.anticipos, 'a'],
+    ['Ingreso neto', s => s.pag.ing.neto, 'a', true],
+    ['Egresos pagados', s => s.pag.egTotal, 'b', true],
+    ['Balance del día', s => s.pag.balance, 'bal', true],
+  ];
+  const filasPublicado = [
     ['Ingresos por ventas', s => s.ing.ventas, 'a'],
     ['Anticipos de clientes', s => s.ing.anticipos, 'a'],
     ['Ingreso neto', s => s.ing.neto, 'a', true],
     ['Egresos publicados', s => s.egTotal, 'b', true],
     ['Balance del día', s => s.balance, 'bal', true],
-    ['Egresos pagados (fecha de pago)', s => s.ctlEg.b.pag[1], 'b'],
     ['Egresos en espera de publicar', s => s.ctlEg.b.esp[1], 'c'],
   ];
   const celda = (x, tipo, max) => {
@@ -1832,11 +1848,12 @@ function htmlReporteDia(dia) {
     return '<td class="r" style="background:rgba(' + col + ',' + a.toFixed(2) + ');' +
            (a > 0.5 ? 'color:#fff;font-weight:700' : '') + '">' + m(x) + '</td>';
   };
-  const tablaSemana =
-    '<table class="t sem"><thead><tr><th>Concepto</th>' +
+  const cabeceraSemana = primera => '<thead><tr><th>' + primera + '</th>' +
     semana.map(s => '<th class="r' + (s.dia === R.dia ? ' hoy' : '') + '">' + diaSemana(s.dia).slice(0, 3) + ' ' +
-                    ddmm(s.dia) + '</th>').join('') + '<th class="r tt">Total 7 días</th></tr></thead><tbody>' +
-    filasSemana.map(f => {
+                    ddmm(s.dia) + '</th>').join('') + '<th class="r tt">Total 7 días</th></tr></thead>';
+  const tablaDias = filas =>
+    '<table class="t sem">' + cabeceraSemana('Concepto') + '<tbody>' +
+    filas.map(f => {
       const vals = semana.map(f[1]);
       const max = Math.max.apply(null, vals.map(Math.abs));
       const tot = vals.reduce((a, x) => a + x, 0);
@@ -1845,34 +1862,35 @@ function htmlReporteDia(dia) {
         '<td class="r tt' + (f[2] === 'bal' ? (tot < 0 ? ' rojo' : ' verde') : '') + '"><b>' + m(tot) + '</b></td></tr>';
     }).join('') + '</tbody></table>';
 
-  // Egresos de la semana por razon (las razones de mayor monto).
+  // Egresos pagados de la semana por razon (las razones de mayor monto).
   const razonesSem = new Map();
-  semana.forEach((s, i) => s.porRazon.forEach(g => {
+  semana.forEach((s, i) => s.pag.porRazon.forEach(g => {
     if (!razonesSem.has(g.razon)) razonesSem.set(g.razon, { razon: g.razon, dias: [0, 0, 0, 0, 0, 0, 0], tot: 0 });
     const x = razonesSem.get(g.razon); x.dias[i] += g.monto; x.tot += g.monto;
   }));
   let topRaz = Array.from(razonesSem.values()).sort((a, b) => b.tot - a.tot);
-  if (topRaz.length > 10) {
-    const resto = topRaz.slice(9);
+  if (topRaz.length > 8) {
+    const resto = topRaz.slice(7);
     const otras = { razon: 'Otras (' + resto.length + ' razones)', dias: [0, 0, 0, 0, 0, 0, 0], tot: 0 };
     resto.forEach(x => { x.dias.forEach((d, i) => { otras.dias[i] += d; }); otras.tot += x.tot; });
-    topRaz = topRaz.slice(0, 9).concat([otras]);
+    topRaz = topRaz.slice(0, 7).concat([otras]);
   }
   const maxRaz = Math.max.apply(null, [0].concat(topRaz.map(x => Math.max.apply(null, x.dias))));
   const tablaRazSem = !topRaz.length ? '' :
-    '<h2>Egresos por razón — últimos 7 días <small>más oscuro = más monto publicado</small></h2>' +
-    '<table class="t sem"><thead><tr><th>Razón de pago</th>' +
-    semana.map(s => '<th class="r' + (s.dia === R.dia ? ' hoy' : '') + '">' + diaSemana(s.dia).slice(0, 3) + ' ' +
-                    ddmm(s.dia) + '</th>').join('') + '<th class="r tt">Total 7 días</th></tr></thead><tbody>' +
+    '<h2>Egresos pagados por razón — últimos 7 días <small>más oscuro = más monto pagado</small></h2>' +
+    '<table class="t sem">' + cabeceraSemana('Razón de pago') + '<tbody>' +
     topRaz.map(x => '<tr><td class="n">' + e(x.razon) + '</td>' + x.dias.map(d => celda(d, 'b', maxRaz)).join('') +
       '<td class="r tt"><b>' + m(x.tot) + '</b></td></tr>').join('') + '</tbody></table>';
 
   const hoja2 =
     '<section class="hoja">' + encabezado(2, 2) +
-    '<h2>Caja — últimos 7 días <small>más oscuro = más monto · en verde ingresos, en azul egresos</small></h2>' +
-    tablaSemana + tablaRazSem +
+    '<h2>Caja — últimos 7 días · pagado <small>fecha de pago · más oscuro = más monto · en verde ingresos, en azul egresos</small></h2>' +
+    tablaDias(filasPagado) + tablaRazSem +
+    '<h2>Control — últimos 7 días · publicado <small>fecha de publicación, igual que el panel</small></h2>' +
+    tablaDias(filasPublicado) +
     '<p class="mini"><b>Ingresos</b>: favorito inglb (clientes). <b>Egresos</b>: favorito Gastoslb (proveedores). ' +
-    'Los montos de ingresos y egresos son pagos publicados en el día (hora de Venezuela), igual que el panel.</p>' +
+    '<b>Pagado</b>: pagos con fecha de pago del día (hora de Venezuela), incluidos los que aún esperan publicarse. ' +
+    '<b>Publicado</b>: pagos publicados en el día, aunque se hayan pagado otro día.</p>' +
     pie + '</section>';
 
   const css =
