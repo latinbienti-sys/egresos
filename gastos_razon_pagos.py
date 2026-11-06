@@ -1729,16 +1729,15 @@ function reporteDia() {
       pendTabla(R.ctlEg.pendientes.concat(R.ctlIng.pendientes))
     : '<p class="vacio">Todos los pagos del día están publicados.</p>') +
 
-  '<h2>¿En qué se fueron los egresos?</h2>' +
   (R.porRazon.length
-    ? '<table><thead><tr><th>Razón de pago</th><th class="r">Pagos</th><th class="r">Monto</th><th class="r">%</th>' +
+    ? '<h2>¿En qué se fueron los egresos?</h2><table><thead><tr><th>Razón de pago</th><th class="r">Pagos</th><th class="r">Monto</th><th class="r">%</th>' +
       '<th style="width:22%"></th></tr></thead><tbody>' +
       R.porRazon.map(g => '<tr><td>' + e(g.razon) + '</td><td class="r">' + g.n + '</td><td class="r">' +
         m(g.monto) + '</td><td class="r">' + p(g.monto, R.egTotal) + '</td><td><div class="bar"><i style="width:' +
         (R.egTotal ? g.monto / R.egTotal * 100 : 0).toFixed(1) + '%"></i></div></td></tr>').join('') +
       '<tr class="tot"><td>Total egresos</td><td class="r">' + R.egRows.length + '</td><td class="r">' +
       m(R.egTotal) + '</td><td class="r">100.0%</td><td></td></tr></tbody></table>'
-    : '<p class="vacio">Sin egresos publicados en el día.</p>') +
+    : '') +
 
   (R.egRows.length
     ? '<h2>Detalle de egresos publicados</h2><table><thead><tr><th>Documento</th><th>Proveedor</th>' +
@@ -1747,12 +1746,6 @@ function reporteDia() {
         '</td><td class="r">' + m(R.v(r)) + '</td></tr>').join('') +
       '<tr class="tot"><td colspan="3">Total</td><td class="r">' + m(R.egTotal) + '</td></tr></tbody></table>'
     : '') +
-
-  '<p class="nota">Ingresos: favorito inglb (clientes, sin transferencias internas). Egresos: favorito Gastoslb ' +
-  '(proveedores, sin transferencias internas). Los montos cuentan solo pagos publicados con fecha de publicación ' +
-  'del día (hora local), igual que el panel y los favoritos de Odoo. "Pagos hechos el día" cuenta los pagos con ' +
-  'fecha de pago del día en cualquier estado; un pago hecho hoy puede publicarse otro día. ' +
-  'Reporte de solo lectura: no se modificó nada en Odoo.</p>' +
   '</body></html>';
 
   const w = window.open('', '_blank');
