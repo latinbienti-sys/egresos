@@ -1614,15 +1614,27 @@ function resumenDia(dia) {
     const set = delDia.filter(r => (lado === 'eg' ? r.isSupplier : r.isCustomer) &&
                                    (r.date || '').slice(0, 10) === dia);
     const est = {};
-    let monto = 0, montoPub = 0;
+    // Pagado = todo lo hecho ese dia salvo cancelados/rechazados.
+    // Publicado = estado publicado (con el dia en que se publico).
+    // En espera = borrador o en aprobacion.
+    const b = { pag: [0, 0], pub: [0, 0], esp: [0, 0], anu: [0, 0] };
+    const diasPub = {};
     set.forEach(r => {
       est[r.state] = (est[r.state] || 0) + 1;
-      monto += v(r);
-      if (r.state === 'posted') montoPub += v(r);
+      const x = v(r);
+      const anulado = r.state === 'cancel' || r.state === 'rejected';
+      if (anulado) { b.anu[0]++; b.anu[1] += x; return; }
+      b.pag[0]++; b.pag[1] += x;
+      if (r.state === 'posted') {
+        b.pub[0]++; b.pub[1] += x;
+        const dp = pubLocalDay(r) || '(sin fecha)';
+        if (!diasPub[dp]) diasPub[dp] = [0, 0];
+        diasPub[dp][0]++; diasPub[dp][1] += x;
+      } else { b.esp[0]++; b.esp[1] += x; }
     });
     const pendientes = set.filter(r => r.state !== 'posted');
     return { total: set.length, publicados: est.posted || 0, est: est, pendientes: pendientes,
-             monto: monto, montoPub: montoPub };
+             b: b, diasPub: diasPub };
   };
 
   return { dia: dia, comp: comp, cur: coCur, ing: ing, egRows: egRows, egTotal: egTotal,
@@ -1642,12 +1654,25 @@ function reporteDia() {
   const estados = ctl => Object.keys(ctl.est).sort().map(s =>
     '<span class="pill ' + (s === 'posted' ? 'ok' : 'pend') + '">' + e(estadoNombre(s)) + ': ' +
     ctl.est[s] + '</span>').join(' ');
-  const ctlBox = (titulo, ctl) =>
-    '<div class="ctl"><h4>' + titulo + '</h4>' +
-    '<div class="big">' + ctl.publicados + ' de ' + ctl.total + ' publicados</div>' +
-    '<div>' + (estados(ctl) || 'Sin pagos con fecha de este día') + '</div>' +
-    (ctl.total ? '<div style="margin-top:4px;color:#666">Monto: ' + m(ctl.monto) + ' · publicado: ' +
-                 m(ctl.montoPub) + '</div>' : '') + '</div>';
+  const fd = s => s.length === 10 ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice(0, 4) : s;
+  const fila = (txt, par, cls) =>
+    '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td>' + txt + '</td><td class="r">' + par[0] +
+    '</td><td class="r">' + m(par[1]) + '</td></tr>';
+  const ctlBox = (titulo, ctl) => {
+    if (!ctl.total) return '<div class="ctl"><h4>' + titulo + '</h4><p class="vacio">Sin pagos con fecha de este día.</p></div>';
+    const dias = Object.keys(ctl.diasPub).sort();
+    return '<div class="ctl"><h4>' + titulo + '</h4>' +
+      '<div class="big">' + ctl.b.pub[0] + ' de ' + ctl.b.pag[0] + ' publicados</div>' +
+      '<div>' + estados(ctl) + '</div>' +
+      '<table class="mini"><thead><tr><th></th><th class="r">Pagos</th><th class="r">Monto</th></tr></thead><tbody>' +
+      fila('<b>Pagado</b>', ctl.b.pag, 'tot0') +
+      fila('<b>Publicado</b>', ctl.b.pub) +
+      dias.map(d => fila('&nbsp;&nbsp;&nbsp;publicado el ' + fd(d) + (d === R.dia ? ' (mismo día)' : ''),
+                         ctl.diasPub[d], 'sub0')).join('') +
+      fila('<b>En espera</b> (borrador / en aprobación)', ctl.b.esp, ctl.b.esp[0] ? 'esp' : '') +
+      (ctl.b.anu[0] ? fila('Cancelado / rechazado (no suma)', ctl.b.anu, 'sub0') : '') +
+      '</tbody></table></div>';
+  };
   const pendTabla = list => !list.length ? '' :
     '<table><thead><tr><th>Documento</th><th>Tipo</th><th>Socio</th><th>Razón</th><th>Estado</th>' +
     '<th class="r">Monto</th></tr></thead><tbody>' +
@@ -1673,6 +1698,9 @@ function reporteDia() {
   '.ctl h4{margin:0 0 4px;font-size:11px;color:#666;text-transform:uppercase}.big{font-size:17px;font-weight:700;color:#213C83;margin-bottom:4px}' +
   '.pill{display:inline-block;border-radius:10px;padding:1px 8px;font-size:10.5px;font-weight:700;margin:2px 2px 0 0;' +
   '-webkit-print-color-adjust:exact;print-color-adjust:exact}.pill.ok{background:#d1fae5;color:#065f46}.pill.pend{background:#fef3c7;color:#92400e}' +
+  'table.mini{margin-top:6px}table.mini th{font-size:9px;padding:3px 6px}table.mini td{padding:3px 6px}' +
+  'tr.tot0 td{border-bottom:1px solid #213C83}tr.sub0 td{color:#666;font-size:11px}' +
+  'tr.esp td{color:#92400e;font-weight:700}' +
   '.nota{color:#8892a8;font-size:10px;margin-top:16px}.vacio{color:#999;padding:6px 0}' +
   '.bar{height:5px;background:#eef1f8;border-radius:3px}.bar i{display:block;height:100%;background:#213C83;border-radius:3px;' +
   '-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
