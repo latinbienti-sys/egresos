@@ -1628,8 +1628,10 @@ function resumenDia(dia) {
   //   Publicado hoy = pagos publicados con fecha de publicacion del dia, con las
   //                   fechas de pago a las que corresponden.
   //   En espera     = pagos con fecha de pago del dia aun sin publicar.
-  const control = lado => {
-    const deLado = r => lado === 'eg' ? r.isSupplier : r.isCustomer;
+  // Categoria de un cobro a cliente, con el criterio inglb.
+  const catIng = r => isDiscountReason(r) ? 'desc' : isAnticipo(r) ? 'ant' : isVenta(r) ? 'venta' : 'otros';
+  const control = (lado, cat) => {
+    const deLado = r => (lado === 'eg' ? r.isSupplier : r.isCustomer) && (!cat || catIng(r) === cat);
     const b = { pag: [0, 0], pub: [0, 0], esp: [0, 0] };
     const fechasPago = {};
     delDia.forEach(r => {
@@ -1648,7 +1650,17 @@ function resumenDia(dia) {
     return { b: b, fechasPago: Object.keys(fechasPago).sort() };
   };
 
+  const ingPorRazon = {};
+  pub.filter(r => r.isCustomer).forEach(r => {
+    const k = catIng(r);
+    if (!ingPorRazon[k]) ingPorRazon[k] = {};
+    ingPorRazon[k][r.reason] = (ingPorRazon[k][r.reason] || 0) + 1;
+  });
+
   return { dia: dia, comp: comp, cur: coCur, ing: ing, egN: egRows.length, egTotal: egTotal,
+           ingPorRazon: ingPorRazon,
+           ctlIngCat: { venta: control('ing', 'venta'), ant: control('ing', 'ant'),
+                        otros: control('ing', 'otros'), desc: control('ing', 'desc') },
            balance: ing.neto - egTotal,
            porRazon: Array.from(porRazon.values()).sort((a, b) => b.monto - a.monto),
            ctlEg: control('eg'), ctlIng: control('ing') };
@@ -1720,14 +1732,37 @@ function reporteDia() {
     '<span>Consulta de solo lectura a Odoo · latinbienti-sys.github.io/egresos/gastos_razon_pagos.html</span></div>';
 
   // --- Hoja 1: resumen, pagado vs publicado y egresos por razon -----------
-  const filaCtl = (nombre, ctl) =>
-    '<tr><td class="n">' + nombre + '</td>' +
+  const filaCtl = (nombre, ctl, cls) =>
+    '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td class="n">' + nombre + '</td>' +
     '<td class="r g1">' + num(ctl.b.pag[0]) + '</td><td class="r">' + num(ctl.b.pag[1], m) + '</td>' +
     '<td class="r g1">' + num(ctl.b.pub[0]) + '</td><td class="r">' + num(ctl.b.pub[1], m) + '</td>' +
     '<td class="c">' + coletilla(ctl) + '</td>' +
     '<td class="r g1">' + (ctl.b.esp[0] ? '<b class="rojo">' + ctl.b.esp[0] + '</b>' : num(0)) + '</td>' +
     '<td class="r">' + (ctl.b.esp[0] ? '<b class="rojo">' + m(ctl.b.esp[1]) + '</b>' : num(0, m)) + '</td></tr>';
   const maxRazon = R.porRazon.length ? R.porRazon[0].monto : 0;
+
+  // ¿De donde vinieron los ingresos? ventas, anticipos y descuentos por separado.
+  const razonesDe = k => Object.keys(R.ingPorRazon[k] || {}).sort().map(e).join(', ') || '<span class="z">–</span>';
+  const catsIng = [
+    ['Ingresos por ventas', 'venta', R.ing.ventas, R.ing.nV, false],
+    ['Anticipos de clientes', 'ant', R.ing.anticipos, R.ing.nA, false],
+    ['Otros ingresos', 'otros', R.ing.otros, R.ing.nO, false],
+    ['Descuentos y devoluciones (restan)', 'desc', R.ing.desc, R.ing.nD, true],
+  ].filter(c => c[2] || c[1] === 'venta' || c[1] === 'ant');
+  const maxIng = Math.max.apply(null, [0].concat(catsIng.map(c => c[2])));
+  const tablaIngresos = !(R.ing.bruto || R.ing.desc) ? '' :
+    '<h2>¿De dónde vinieron los ingresos? <small>cobros a clientes publicados hoy</small></h2>' +
+    '<table class="t"><thead><tr><th>Concepto</th><th>Razón de pago en Odoo</th><th class="r">Pagos</th>' +
+    '<th class="r">Monto</th><th class="r">% del bruto</th><th style="width:28%"></th></tr></thead><tbody>' +
+    catsIng.map(c => '<tr><td class="n"' + (c[4] ? ' style="color:#b91c1c"' : '') + '>' + c[0] + '</td><td class="c">' +
+      razonesDe(c[1]) + '</td><td class="r">' + num(c[3]) + '</td><td class="r' + (c[4] ? ' rojo' : '') + '">' +
+      (c[2] ? (c[4] ? '-' : '') + m(c[2]) : num(0, m)) + '</td><td class="r">' +
+      (R.ing.bruto ? (c[2] / R.ing.bruto * 100).toFixed(1) : '0.0') + '%</td><td><div class="bar"><i style="width:' +
+      (maxIng ? c[2] / maxIng * 100 : 0).toFixed(1) + '%;background:' + (c[4] ? '#b91c1c' : '#23955a') +
+      '"></i></div></td></tr>').join('') +
+    '<tr class="tot"><td>Ingreso neto</td><td class="c" style="font-weight:400">ventas + anticipos − descuentos</td>' +
+    '<td class="r">' + (R.ing.nV + R.ing.nA + R.ing.nO + R.ing.nD) + '</td><td class="r">' + m(R.ing.neto) +
+    '</td><td></td><td></td></tr></tbody></table>';
 
   const hoja1 =
     '<section class="hoja">' + encabezado(1, 2) +
@@ -1753,11 +1788,18 @@ function reporteDia() {
       '<th class="r g1">Pagos</th><th class="r">Monto</th><th>Corresponde a</th>' +
       '<th class="r g1">Pagos</th><th class="r">Monto</th></tr></thead><tbody>' +
       filaCtl('Egresos (pagos a proveedores)', R.ctlEg) +
-      filaCtl('Ingresos (cobros a clientes)', R.ctlIng) +
+      filaCtl('<b>Ingresos (cobros a clientes)</b>', R.ctlIng, 'fuerte') +
+      filaCtl('&nbsp;&nbsp;&nbsp;· Ingresos por ventas', R.ctlIngCat.venta, 'subi') +
+      filaCtl('&nbsp;&nbsp;&nbsp;· Anticipos de clientes', R.ctlIngCat.ant, 'subi') +
+      (R.ctlIngCat.otros.b.pag[0] || R.ctlIngCat.otros.b.pub[0]
+        ? filaCtl('&nbsp;&nbsp;&nbsp;· Otros ingresos', R.ctlIngCat.otros, 'subi') : '') +
+      (R.ctlIngCat.desc.b.pag[0] || R.ctlIngCat.desc.b.pub[0]
+        ? filaCtl('&nbsp;&nbsp;&nbsp;· Descuentos y devoluciones (restan)', R.ctlIngCat.desc, 'subi') : '') +
     '</tbody></table>' +
     '<p class="mini"><b>Pagado hoy</b>: pagos con fecha de pago de hoy. <b>Publicado hoy</b>: pagos publicados hoy, ' +
     'aunque se hayan pagado otro día. <b>En espera</b>: pagados hoy y todavía sin publicar (borrador o en aprobación).</p>' +
 
+    tablaIngresos +
     (R.porRazon.length
       ? '<h2>¿En qué se fueron los egresos? <small>egresos publicados hoy por razón de pago</small></h2>' +
         '<table class="t"><thead><tr><th>Razón de pago</th><th class="r">Pagos</th><th class="r">Monto</th>' +
@@ -1857,7 +1899,7 @@ function reporteDia() {
     '.g1{border-left:2px solid #c9d3e3}.r{text-align:right;white-space:nowrap}.n{white-space:nowrap}' +
     '.c{color:#374151}.z{color:#c3cad6}.rojo{color:#b91c1c}.verde{color:#15803d}' +
     '.t tr.tot td{font-weight:700;background:#eef2f8;border-top:1.5px solid #17375e}' +
-    '.t tr.fuerte td.n{font-weight:700}.tt{border-left:2px solid #c9d3e3}.t th.hoy{color:#17375e;text-decoration:underline}' +
+    '.t tr.subi td{color:#4b5563;font-size:10.5px;padding-top:3px;padding-bottom:3px}.t tr.fuerte td.n{font-weight:700}.tt{border-left:2px solid #c9d3e3}.t th.hoy{color:#17375e;text-decoration:underline}' +
     '.t th.r{text-align:right}.sem td.r,.sem th.r{text-align:center}.sem td.n{text-align:left}.sem td{padding:3px 6px}' +
     '.bar{height:9px;background:#eef2f8;border-radius:2px}.bar i{display:block;height:100%;background:#2d5d9f;border-radius:2px}' +
     '.mini{color:#6b7280;font-size:10px;margin:5px 0 0}' +
