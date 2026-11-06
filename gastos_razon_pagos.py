@@ -1601,8 +1601,9 @@ function resumenDia(dia) {
   const delDia = ROWS.filter(r => (!comp || r.comp === comp) && (r.isCustomer || r.isSupplier) &&
                                   (pubLocalDay(r) === dia || (r.date || '').slice(0, 10) === dia));
   const pub = delDia.filter(r => r.state === 'posted' && pubLocalDay(r) === dia);
-  // Pagado en el dia: fecha de pago del dia, publicado o no (sin cancelados/rechazados).
-  const pag = delDia.filter(r => (r.date || '').slice(0, 10) === dia && r.state !== 'cancel' && r.state !== 'rejected');
+  // Pagado en el dia: solo pagos confirmados (publicados) con fecha de pago del dia.
+  // Los aprobados sin publicar o en espera de aprobacion quedan solo "en espera".
+  const pag = delDia.filter(r => (r.date || '').slice(0, 10) === dia && r.state === 'posted');
 
   // Categoria de un cobro a cliente, con el criterio inglb.
   const catIng = r => isDiscountReason(r) ? 'desc' : isAnticipo(r) ? 'ant' : isVenta(r) ? 'venta' : 'otros';
@@ -1638,10 +1639,11 @@ function resumenDia(dia) {
   const P = resumir(pub);
 
   // Por lado:
-  //   Pagado hoy    = pagos con fecha de pago del dia (sin cancelados/rechazados).
+  //   Pagado hoy    = pagos confirmados (publicados) con fecha de pago del dia.
   //   Publicado hoy = pagos publicados con fecha de publicacion del dia, con las
   //                   fechas de pago a las que corresponden.
-  //   En espera     = pagos con fecha de pago del dia aun sin publicar.
+  //   En espera     = pagos con fecha de pago del dia aun sin publicar (aprobados o en
+  //                   espera de aprobacion; sin cancelados/rechazados). No suman a pagado.
   const control = (lado, cat) => {
     const deLado = r => (lado === 'eg' ? r.isSupplier : r.isCustomer) && (!cat || catIng(r) === cat);
     const b = { pag: [0, 0], pub: [0, 0], esp: [0, 0] };
@@ -1650,10 +1652,8 @@ function resumenDia(dia) {
       if (!deLado(r)) return;
       const x = v(r);
       const fp = (r.date || '').slice(0, 10);
-      if (fp === dia && r.state !== 'cancel' && r.state !== 'rejected') {
-        b.pag[0]++; b.pag[1] += x;
-        if (r.state !== 'posted') { b.esp[0]++; b.esp[1] += x; }
-      }
+      if (fp === dia && r.state === 'posted') { b.pag[0]++; b.pag[1] += x; }
+      else if (fp === dia && r.state !== 'cancel' && r.state !== 'rejected') { b.esp[0]++; b.esp[1] += x; }
       if (r.state === 'posted' && pubLocalDay(r) === dia) {
         b.pub[0]++; b.pub[1] += x;
         if (fp) fechasPago[fp] = true;
@@ -1720,9 +1720,9 @@ function htmlReporteDia(dia) {
   // Para revisar: solo lo que pide accion o explica una cifra.
   const avisos = [];
   if (R.ctlEg.b.esp[0]) avisos.push('<b>Pagos a proveedores</b>: ' + R.ctlEg.b.esp[0] +
-    ' pagado(s) hoy sin publicar por <b>' + m(R.ctlEg.b.esp[1]) + '</b>.');
+    ' en espera de publicar (aprobados o por aprobar) con fecha de pago de hoy por <b>' + m(R.ctlEg.b.esp[1]) + '</b>.');
   if (R.ctlIng.b.esp[0]) avisos.push('<b>Cobros a clientes</b>: ' + R.ctlIng.b.esp[0] +
-    ' cobrado(s) hoy sin publicar por <b>' + m(R.ctlIng.b.esp[1]) + '</b>.');
+    ' en espera de publicar con fecha de pago de hoy por <b>' + m(R.ctlIng.b.esp[1]) + '</b>.');
   const otrasEg = R.ctlEg.fechasPago.filter(f => f !== R.dia);
   if (otrasEg.length) avisos.push('<b>Egresos publicados hoy</b>: corresponden a pagos del ' +
     listaFechas(otrasEg) + '.');
@@ -1773,20 +1773,25 @@ function htmlReporteDia(dia) {
     '<td class="r">' + (D.ing.nV + D.ing.nA + D.ing.nO + D.ing.nD) + '</td><td class="r">' + m(D.ing.neto) +
     '</td><td></td><td></td></tr></tbody></table>';
 
+  // Resumen del dia en dos filas alineadas: publicado (como el panel) y pagado (caja real).
+  const conOtros = R.ing.otros || D.ing.otros;
+  const nEspera = R.ctlEg.b.esp[0] + R.ctlIng.b.esp[0];
+  const filaKpi = (X, titulo, nota, egLabel, ultima) =>
+    '<div class="kpl">' + titulo + ' <small>' + nota + '</small></div><div class="kp">' +
+      kpi('Ingresos por ventas', m(X.ing.ventas)) +
+      kpi('Anticipos de clientes', m(X.ing.anticipos)) +
+      (conOtros ? kpi('Otros ingresos', m(X.ing.otros)) : '') +
+      kpi('Descuentos y devol.', '-' + m(X.ing.desc)) +
+      kpi('Ingreso neto', m(X.ing.neto), 'pos') +
+      kpi(egLabel, m(X.egTotal), 'neg') +
+      kpi('Balance del día', m(X.balance), X.balance >= 0 ? 'pos' : 'neg') +
+      ultima + '</div>';
   const hoja1 =
     '<section class="hoja">' + encabezado(1, 2) +
-    '<div class="kp">' +
-      kpi('Ingresos por ventas', m(D.ing.ventas)) +
-      kpi('Anticipos de clientes', m(D.ing.anticipos)) +
-      (D.ing.otros ? kpi('Otros ingresos', m(D.ing.otros)) : '') +
-      kpi('Descuentos y devol.', '-' + m(D.ing.desc)) +
-      kpi('Ingreso neto', m(D.ing.neto), 'pos') +
-      kpi('Egresos pagados', m(D.egTotal), 'neg') +
-      kpi('Balance del día', m(D.balance), D.balance >= 0 ? 'pos' : 'neg') +
-      kpi('Pagos en espera', String(R.ctlEg.b.esp[0] + R.ctlIng.b.esp[0]),
-          (R.ctlEg.b.esp[0] + R.ctlIng.b.esp[0]) ? 'neg' : '') +
-    '</div>' +
-    '<p class="mini" style="margin:-4px 0 8px">Resumen con lo <b>pagado hoy</b> (fecha de pago), incluidos los pagos que aún esperan publicarse.</p>' +
+    filaKpi(R, 'Publicado hoy', 'fecha de publicación, igual que el panel', 'Egresos publicados',
+            '<div class="k vacio"></div>') +
+    filaKpi(D, 'Pagado hoy', 'pagos confirmados con fecha de pago de hoy', 'Egresos pagados',
+            kpi('Pagos en espera', String(nEspera), nEspera ? 'neg' : '')) +
     (avisos.length ? '<div class="rev"><div class="revt">Para revisar</div><ul>' +
       avisos.map(a => '<li>' + a + '</li>').join('') + '</ul></div>' : '') +
 
@@ -1806,8 +1811,8 @@ function htmlReporteDia(dia) {
       (R.ctlIngCat.desc.b.pag[0] || R.ctlIngCat.desc.b.pub[0]
         ? filaCtl('&nbsp;&nbsp;&nbsp;· Descuentos y devoluciones (restan)', R.ctlIngCat.desc, 'subi') : '') +
     '</tbody></table>' +
-    '<p class="mini"><b>Pagado hoy</b>: pagos con fecha de pago de hoy. <b>Publicado hoy</b>: pagos publicados hoy, ' +
-    'aunque se hayan pagado otro día. <b>En espera</b>: pagados hoy y todavía sin publicar (borrador o en aprobación).</p>' +
+    '<p class="mini"><b>Pagado hoy</b>: pagos confirmados (publicados) con fecha de pago de hoy. <b>Publicado hoy</b>: pagos publicados hoy, ' +
+    'aunque se hayan pagado otro día. <b>En espera</b>: con fecha de pago de hoy y todavía sin publicar (aprobados o en espera de aprobación); no suman a lo pagado.</p>' +
 
     tablaIngresos +
     (D.porRazon.length
@@ -1820,7 +1825,10 @@ function htmlReporteDia(dia) {
           '%"></i></div></td></tr>').join('') +
         '<tr class="tot"><td>Total egresos</td><td class="r">' + D.egN + '</td><td class="r">' + m(D.egTotal) +
         '</td><td class="r">100.0%</td><td></td></tr></tbody></table>'
-      : '') +
+      : '<h2>¿En qué se fueron los egresos? <small>egresos pagados hoy (fecha de pago) por razón de pago</small></h2>' +
+        '<p class="mini" style="font-size:11px">Sin egresos confirmados con fecha de pago de hoy.' +
+        (R.ctlEg.b.esp[0] ? ' Hay <b>' + R.ctlEg.b.esp[0] + '</b> en espera de publicar por <b>' + m(R.ctlEg.b.esp[1]) +
+          '</b> (ver Pagado vs. publicado).' : '') + '</p>') +
     pie + '</section>';
 
   // --- Hoja 2: ultimos 7 dias ---------------------------------------------
@@ -1889,7 +1897,7 @@ function htmlReporteDia(dia) {
     '<h2>Control — últimos 7 días · publicado <small>fecha de publicación, igual que el panel</small></h2>' +
     tablaDias(filasPublicado) +
     '<p class="mini"><b>Ingresos</b>: favorito inglb (clientes). <b>Egresos</b>: favorito Gastoslb (proveedores). ' +
-    '<b>Pagado</b>: pagos con fecha de pago del día (hora de Venezuela), incluidos los que aún esperan publicarse. ' +
+    '<b>Pagado</b>: pagos confirmados (publicados) con fecha de pago del día (hora de Venezuela). ' +
     '<b>Publicado</b>: pagos publicados en el día, aunque se hayan pagado otro día.</p>' +
     pie + '</section>';
 
@@ -1906,7 +1914,9 @@ function htmlReporteDia(dia) {
     '.gen{color:#6b7280;font-size:10.5px}' +
     '.kp{display:flex;gap:7px;margin-bottom:9px}.k{flex:1;border:1px solid #c9d3e3;border-radius:6px;padding:6px 9px}' +
     '.k span{display:block;color:#4b5563;font-size:10px}.k b{font-size:16px;color:#17375e}' +
-    '.k.pos b{color:#15803d}.k.neg b{color:#b91c1c}' +
+    '.k.pos b{color:#15803d}.k.neg b{color:#b91c1c}.k.vacio{visibility:hidden}' +
+    '.kpl{color:#17375e;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin:0 0 3px}' +
+    '.kpl small{color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0}' +
     '.rev{background:#fdecec;border:1px solid #f5c2c2;border-radius:6px;padding:7px 12px;margin-bottom:10px}' +
     '.revt{color:#b91c1c;font-weight:700;margin-bottom:3px}.rev ul{margin:0;padding-left:0;list-style:none;columns:2}' +
     '.rev li{margin:2px 0}.rev li:before{content:"• "}' +
