@@ -1549,20 +1549,34 @@ function setPreset(kind) {
 }
 
 // ---- Reporte del dia (PDF) ---------------------------------------------
-// Solo lee los datos ya cargados en el panel: no consulta ni modifica Odoo.
-// Dia en hora local, "YYYY-MM-DD".
+// Cierre de caja del dia. Solo lee los datos ya cargados en el panel: no
+// consulta ni modifica Odoo. Las fechas se llevan a hora de Venezuela.
+const TZ_REPORTE = 'America/Caracas';
+const FMT_DIA = (function () {
+  try { return new Intl.DateTimeFormat('en-CA', { timeZone: TZ_REPORTE, year: 'numeric',
+                                                  month: '2-digit', day: '2-digit' }); }
+  catch (_) { return null; }
+})();
+// Dia en hora de Venezuela, "YYYY-MM-DD".
 function localDay(d) {
+  if (FMT_DIA) return FMT_DIA.format(d);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
          String(d.getDate()).padStart(2, '0');
 }
 // La fecha de publicacion llega de Odoo en UTC ("2026-11-05 22:10:56"): se pasa
 // a hora local para que lo publicado de noche no caiga en el dia siguiente.
 function pubLocalDay(r) {
+  if (r._pd !== undefined) return r._pd;
   const p = r.pubdate || '';
-  if (p.length < 10) return '';
-  if (p.length < 16) return p.slice(0, 10);
-  const d = new Date(p.replace(' ', 'T') + 'Z');
-  return isNaN(d) ? p.slice(0, 10) : localDay(d);
+  let out = '';
+  if (p.length >= 16) {
+    const d = new Date(p.replace(' ', 'T') + 'Z');
+    out = isNaN(d) ? p.slice(0, 10) : localDay(d);
+  } else if (p.length >= 10) {
+    out = p.slice(0, 10);
+  }
+  r._pd = out;
+  return out;
 }
 // Dia del reporte: el elegido si Desde = Hasta; si no, hoy.
 function diaReporte() {
@@ -1570,9 +1584,11 @@ function diaReporte() {
   const t = document.getElementById('fTo').value;
   return (f && f === t) ? f : localDay(new Date());
 }
-const ESTADO_NOMBRE = { posted: 'Publicado', draft: 'Borrador', waiting_approval: 'En aprobación',
-                        cancel: 'Cancelado', rejected: 'Rechazado' };
-function estadoNombre(s) { return ESTADO_NOMBRE[s] || s || '(sin estado)'; }
+function sumarDias(dia, n) {
+  const d = new Date(dia + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
 
 function resumenDia(dia) {
   const comp = document.getElementById('fComp').value;
@@ -1587,9 +1603,9 @@ function resumenDia(dia) {
   const pub = delDia.filter(r => r.state === 'posted' && pubLocalDay(r) === dia);
 
   // Ingresos: criterio inglb (ventas + anticipos + otros - descuentos).
-  const ing = { ventas: 0, anticipos: 0, otros: 0, desc: 0, n: 0, nV: 0, nA: 0, nO: 0, nD: 0 };
+  const ing = { ventas: 0, anticipos: 0, otros: 0, desc: 0, nV: 0, nA: 0, nO: 0, nD: 0 };
   pub.filter(r => r.isCustomer).forEach(r => {
-    const x = v(r); ing.n++;
+    const x = v(r);
     if (isDiscountReason(r)) { ing.desc += x; ing.nD++; }
     else if (isAnticipo(r)) { ing.anticipos += x; ing.nA++; }
     else if (isVenta(r)) { ing.ventas += x; ing.nV++; }
@@ -1599,7 +1615,7 @@ function resumenDia(dia) {
   ing.neto = ing.bruto - ing.desc;
 
   // Egresos: criterio Gastoslb (proveedores publicados), agrupados por razon.
-  const egRows = pub.filter(r => r.isSupplier).sort((a, b) => v(b) - v(a));
+  const egRows = pub.filter(r => r.isSupplier);
   const egTotal = egRows.reduce((a, r) => a + v(r), 0);
   const porRazon = new Map();
   egRows.forEach(r => {
@@ -1607,10 +1623,10 @@ function resumenDia(dia) {
     const g = porRazon.get(r.reason); g.monto += v(r); g.n++;
   });
 
-  // Control simple por lado:
+  // Por lado:
   //   Pagado hoy    = pagos con fecha de pago del dia (sin cancelados/rechazados).
-  //   Publicado hoy = pagos publicados con fecha de publicacion del dia; se
-  //                   anotan las fechas de pago a las que corresponden.
+  //   Publicado hoy = pagos publicados con fecha de publicacion del dia, con las
+  //                   fechas de pago a las que corresponden.
   //   En espera     = pagos con fecha de pago del dia aun sin publicar.
   const control = lado => {
     const deLado = r => lado === 'eg' ? r.isSupplier : r.isCustomer;
@@ -1632,107 +1648,228 @@ function resumenDia(dia) {
     return { b: b, fechasPago: Object.keys(fechasPago).sort() };
   };
 
-  return { dia: dia, comp: comp, cur: coCur, ing: ing, egRows: egRows, egTotal: egTotal,
+  return { dia: dia, comp: comp, cur: coCur, ing: ing, egN: egRows.length, egTotal: egTotal,
+           balance: ing.neto - egTotal,
            porRazon: Array.from(porRazon.values()).sort((a, b) => b.monto - a.monto),
-           ctlEg: control('eg'), ctlIng: control('ing'), v: v };
+           ctlEg: control('eg'), ctlIng: control('ing') };
+}
+
+const DIA_SEMANA = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+const MESES_LARGO = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto',
+                     'septiembre', 'octubre', 'noviembre', 'diciembre'];
+function diaSemana(dia) { return DIA_SEMANA[new Date(dia + 'T12:00:00Z').getUTCDay()]; }
+function ddmm(dia) { return dia.slice(8, 10) + '/' + dia.slice(5, 7); }
+// ["2026-11-03","2026-11-04"] -> "03 y 04 de noviembre"
+function listaFechas(fechas) {
+  const porMes = [];
+  fechas.forEach(f => {
+    const k = f.slice(0, 7);
+    let g = porMes.find(x => x.k === k);
+    if (!g) { g = { k: k, dias: [] }; porMes.push(g); }
+    g.dias.push(f.slice(8, 10));
+  });
+  const y = arr => arr.length > 1 ? arr.slice(0, -1).join(', ') + ' y ' + arr[arr.length - 1] : arr[0];
+  return y(porMes.map(g => y(g.dias) + ' de ' + MESES_LARGO[Number(g.k.slice(5, 7)) - 1]));
 }
 
 function reporteDia() {
   const R = resumenDia(diaReporte());
   const m = x => fmt(x, R.cur);
   const e = escapeHtml;
-  const [yy, mm, dd] = R.dia.split('-');
-  const fechaTxt = dd + '/' + mm + '/' + yy;
-  const p = (a, b) => b ? (a / b * 100).toFixed(1) + '%' : '0.0%';
-  const balance = R.ing.neto - R.egTotal;
+  const fechaTxt = diaSemana(R.dia) + ' ' + ddmm(R.dia) + '/' + R.dia.slice(0, 4);
+  const ahora = new Date();
+  let generado;
+  try {
+    generado = new Intl.DateTimeFormat('sv-SE', { timeZone: TZ_REPORTE, year: 'numeric', month: '2-digit',
+      day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(ahora);
+  } catch (_) { generado = ahora.toISOString().slice(0, 16).replace('T', ' '); }
 
-  const MESES_LARGO = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto',
-                       'septiembre','octubre','noviembre','diciembre'];
-  // ["2026-11-03","2026-11-04"] -> "03 y 04 de noviembre"
-  const listaFechas = fechas => {
-    const porMes = [];
-    fechas.forEach(f => {
-      const k = f.slice(0, 7);
-      let g = porMes.find(x => x.k === k);
-      if (!g) { g = { k: k, dias: [] }; porMes.push(g); }
-      g.dias.push(f.slice(8, 10));
-    });
-    const y = arr => arr.length > 1 ? arr.slice(0, -1).join(', ') + ' y ' + arr[arr.length - 1] : arr[0];
-    return y(porMes.map(g => y(g.dias) + ' de ' + MESES_LARGO[Number(g.k.slice(5, 7)) - 1]));
-  };
-  const fila = (txt, par, cls) =>
-    '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td>' + txt + '</td><td class="r">' + par[0] +
-    '</td><td class="r">' + m(par[1]) + '</td></tr>';
-  const ctlBox = (titulo, ctl) => {
+  // Ultimos 7 dias, terminando en el dia del reporte.
+  const semana = [];
+  for (let i = 6; i >= 0; i--) semana.push(resumenDia(sumarDias(R.dia, -i)));
+
+  // Valor 0 en gris claro, como en el cierre de ejecutivos.
+  const num = (x, fmtFn) => x ? (fmtFn ? fmtFn(x) : x) : '<span class="z">' + (fmtFn ? fmtFn(0) : 0) + '</span>';
+  const coletilla = ctl => {
     const otras = ctl.fechasPago.filter(f => f !== R.dia);
-    const coletilla = !otras.length ? ''
-      : '<tr class="sub0"><td colspan="3">' +
-        (ctl.fechasPago.indexOf(R.dia) !== -1 ? 'Incluye pagos del ' : 'Corresponde a pagos del ') +
-        listaFechas(otras) + '</td></tr>';
-    return '<div class="ctl"><h4>' + titulo + '</h4>' +
-      '<table class="mini"><thead><tr><th></th><th class="r">Pagos</th><th class="r">Monto</th></tr></thead><tbody>' +
-      fila('<b>Pagado hoy</b>', ctl.b.pag) +
-      fila('<b>Publicado hoy</b>', ctl.b.pub) + coletilla +
-      fila('<b>En espera</b> (pagado hoy, sin publicar)', ctl.b.esp, ctl.b.esp[0] ? 'esp' : '') +
-      '</tbody></table></div>';
+    if (!otras.length) return ctl.b.pub[0] ? 'Pagos de hoy' : '<span class="z">–</span>';
+    return (ctl.fechasPago.indexOf(R.dia) !== -1 ? 'Incluye pagos del ' : 'Pagos del ') + listaFechas(otras);
   };
+
+  // Para revisar: solo lo que pide accion o explica una cifra.
+  const avisos = [];
+  if (R.ctlEg.b.esp[0]) avisos.push('<b>Pagos a proveedores</b>: ' + R.ctlEg.b.esp[0] +
+    ' pagado(s) hoy sin publicar por <b>' + m(R.ctlEg.b.esp[1]) + '</b>.');
+  if (R.ctlIng.b.esp[0]) avisos.push('<b>Cobros a clientes</b>: ' + R.ctlIng.b.esp[0] +
+    ' cobrado(s) hoy sin publicar por <b>' + m(R.ctlIng.b.esp[1]) + '</b>.');
+  const otrasEg = R.ctlEg.fechasPago.filter(f => f !== R.dia);
+  if (otrasEg.length) avisos.push('<b>Egresos publicados hoy</b>: corresponden a pagos del ' +
+    listaFechas(otrasEg) + '.');
+  if (R.balance < 0) avisos.push('<b>Balance del día</b>: déficit de ' + m(-R.balance) + '.');
+
+  const kpi = (label, valor, cls) =>
+    '<div class="k' + (cls ? ' ' + cls : '') + '"><span>' + label + '</span><b>' + valor + '</b></div>';
+
+  const encabezado = (hoja, total) =>
+    '<div class="hd"><div><h1>Cierre del día · Caja</h1><div class="fecha">' + fechaTxt + '</div></div>' +
+    '<div class="hdr"><div class="sello">FOTO FIJA · NO SE MODIFICA</div>' +
+    '<div class="gen">Generado ' + e(generado) + ' (hora Venezuela) · Pagos (Odoo) · ' +
+    (R.comp ? e(R.comp) + ' · ' : '') + 'Montos en ' + e(R.cur) + ' · Hoja ' + hoja + ' de ' + total +
+    '</div></div></div>';
+  const pie = '<div class="pie"><span>Latinbien · Caja y egresos</span>' +
+    '<span>Consulta de solo lectura a Odoo · latinbienti-sys.github.io/egresos/gastos_razon_pagos.html</span></div>';
+
+  // --- Hoja 1: resumen, pagado vs publicado y egresos por razon -----------
+  const filaCtl = (nombre, ctl) =>
+    '<tr><td class="n">' + nombre + '</td>' +
+    '<td class="r g1">' + num(ctl.b.pag[0]) + '</td><td class="r">' + num(ctl.b.pag[1], m) + '</td>' +
+    '<td class="r g1">' + num(ctl.b.pub[0]) + '</td><td class="r">' + num(ctl.b.pub[1], m) + '</td>' +
+    '<td class="c">' + coletilla(ctl) + '</td>' +
+    '<td class="r g1">' + (ctl.b.esp[0] ? '<b class="rojo">' + ctl.b.esp[0] + '</b>' : num(0)) + '</td>' +
+    '<td class="r">' + (ctl.b.esp[0] ? '<b class="rojo">' + m(ctl.b.esp[1]) + '</b>' : num(0, m)) + '</td></tr>';
+  const maxRazon = R.porRazon.length ? R.porRazon[0].monto : 0;
+
+  const hoja1 =
+    '<section class="hoja">' + encabezado(1, 2) +
+    '<div class="kp">' +
+      kpi('Ingresos por ventas', m(R.ing.ventas)) +
+      kpi('Anticipos de clientes', m(R.ing.anticipos)) +
+      (R.ing.otros ? kpi('Otros ingresos', m(R.ing.otros)) : '') +
+      kpi('Descuentos y devol.', '-' + m(R.ing.desc)) +
+      kpi('Ingreso neto', m(R.ing.neto), 'pos') +
+      kpi('Egresos publicados', m(R.egTotal), 'neg') +
+      kpi('Balance del día', m(R.balance), R.balance >= 0 ? 'pos' : 'neg') +
+      kpi('Pagos en espera', String(R.ctlEg.b.esp[0] + R.ctlIng.b.esp[0]),
+          (R.ctlEg.b.esp[0] + R.ctlIng.b.esp[0]) ? 'neg' : '') +
+    '</div>' +
+    (avisos.length ? '<div class="rev"><div class="revt">Para revisar</div><ul>' +
+      avisos.map(a => '<li>' + a + '</li>').join('') + '</ul></div>' : '') +
+
+    '<h2>Pagado vs. publicado</h2>' +
+    '<table class="t"><thead>' +
+      '<tr class="grp"><th></th><th colspan="2" class="ga">Pagado hoy</th>' +
+      '<th colspan="3" class="gb">Publicado hoy</th><th colspan="2" class="gc">En espera</th></tr>' +
+      '<tr><th>Concepto</th><th class="r g1">Pagos</th><th class="r">Monto</th>' +
+      '<th class="r g1">Pagos</th><th class="r">Monto</th><th>Corresponde a</th>' +
+      '<th class="r g1">Pagos</th><th class="r">Monto</th></tr></thead><tbody>' +
+      filaCtl('Egresos (pagos a proveedores)', R.ctlEg) +
+      filaCtl('Ingresos (cobros a clientes)', R.ctlIng) +
+    '</tbody></table>' +
+    '<p class="mini"><b>Pagado hoy</b>: pagos con fecha de pago de hoy. <b>Publicado hoy</b>: pagos publicados hoy, ' +
+    'aunque se hayan pagado otro día. <b>En espera</b>: pagados hoy y todavía sin publicar (borrador o en aprobación).</p>' +
+
+    (R.porRazon.length
+      ? '<h2>¿En qué se fueron los egresos? <small>egresos publicados hoy por razón de pago</small></h2>' +
+        '<table class="t"><thead><tr><th>Razón de pago</th><th class="r">Pagos</th><th class="r">Monto</th>' +
+        '<th class="r">%</th><th style="width:38%"></th></tr></thead><tbody>' +
+        R.porRazon.map(g => '<tr><td class="n">' + e(g.razon) + '</td><td class="r">' + g.n + '</td><td class="r">' +
+          m(g.monto) + '</td><td class="r">' + (R.egTotal ? (g.monto / R.egTotal * 100).toFixed(1) : '0.0') +
+          '%</td><td><div class="bar"><i style="width:' + (maxRazon ? g.monto / maxRazon * 100 : 0).toFixed(1) +
+          '%"></i></div></td></tr>').join('') +
+        '<tr class="tot"><td>Total egresos</td><td class="r">' + R.egN + '</td><td class="r">' + m(R.egTotal) +
+        '</td><td class="r">100.0%</td><td></td></tr></tbody></table>'
+      : '') +
+    pie + '</section>';
+
+  // --- Hoja 2: ultimos 7 dias ---------------------------------------------
+  const filasSemana = [
+    ['Ingresos por ventas', s => s.ing.ventas, 'a'],
+    ['Anticipos de clientes', s => s.ing.anticipos, 'a'],
+    ['Ingreso neto', s => s.ing.neto, 'a', true],
+    ['Egresos publicados', s => s.egTotal, 'b', true],
+    ['Balance del día', s => s.balance, 'bal', true],
+    ['Egresos pagados (fecha de pago)', s => s.ctlEg.b.pag[1], 'b'],
+    ['Egresos en espera de publicar', s => s.ctlEg.b.esp[1], 'c'],
+  ];
+  const celda = (x, tipo, max) => {
+    if (tipo === 'bal') return '<td class="r ' + (x < 0 ? 'rojo' : x > 0 ? 'verde' : '') + '">' + (x ? m(x) : '<span class="z">0</span>') + '</td>';
+    if (!x) return '<td class="r"><span class="z">0</span></td>';
+    const a = max ? Math.max(0.08, x / max * 0.85) : 0;
+    const col = tipo === 'a' ? '35,149,90' : tipo === 'c' ? '224,123,36' : '45,93,159';
+    return '<td class="r" style="background:rgba(' + col + ',' + a.toFixed(2) + ');' +
+           (a > 0.5 ? 'color:#fff;font-weight:700' : '') + '">' + m(x) + '</td>';
+  };
+  const tablaSemana =
+    '<table class="t sem"><thead><tr><th>Concepto</th>' +
+    semana.map(s => '<th class="r' + (s.dia === R.dia ? ' hoy' : '') + '">' + diaSemana(s.dia).slice(0, 3) + ' ' +
+                    ddmm(s.dia) + '</th>').join('') + '<th class="r tt">Total 7 días</th></tr></thead><tbody>' +
+    filasSemana.map(f => {
+      const vals = semana.map(f[1]);
+      const max = Math.max.apply(null, vals.map(Math.abs));
+      const tot = vals.reduce((a, x) => a + x, 0);
+      return '<tr' + (f[3] ? ' class="fuerte"' : '') + '><td class="n">' + f[0] + '</td>' +
+        vals.map(x => celda(x, f[2], max)).join('') +
+        '<td class="r tt' + (f[2] === 'bal' ? (tot < 0 ? ' rojo' : ' verde') : '') + '"><b>' + m(tot) + '</b></td></tr>';
+    }).join('') + '</tbody></table>';
+
+  // Egresos de la semana por razon (las razones de mayor monto).
+  const razonesSem = new Map();
+  semana.forEach((s, i) => s.porRazon.forEach(g => {
+    if (!razonesSem.has(g.razon)) razonesSem.set(g.razon, { razon: g.razon, dias: [0, 0, 0, 0, 0, 0, 0], tot: 0 });
+    const x = razonesSem.get(g.razon); x.dias[i] += g.monto; x.tot += g.monto;
+  }));
+  let topRaz = Array.from(razonesSem.values()).sort((a, b) => b.tot - a.tot);
+  if (topRaz.length > 10) {
+    const resto = topRaz.slice(9);
+    const otras = { razon: 'Otras (' + resto.length + ' razones)', dias: [0, 0, 0, 0, 0, 0, 0], tot: 0 };
+    resto.forEach(x => { x.dias.forEach((d, i) => { otras.dias[i] += d; }); otras.tot += x.tot; });
+    topRaz = topRaz.slice(0, 9).concat([otras]);
+  }
+  const maxRaz = Math.max.apply(null, [0].concat(topRaz.map(x => Math.max.apply(null, x.dias))));
+  const tablaRazSem = !topRaz.length ? '' :
+    '<h2>Egresos por razón — últimos 7 días <small>más oscuro = más monto publicado</small></h2>' +
+    '<table class="t sem"><thead><tr><th>Razón de pago</th>' +
+    semana.map(s => '<th class="r' + (s.dia === R.dia ? ' hoy' : '') + '">' + diaSemana(s.dia).slice(0, 3) + ' ' +
+                    ddmm(s.dia) + '</th>').join('') + '<th class="r tt">Total 7 días</th></tr></thead><tbody>' +
+    topRaz.map(x => '<tr><td class="n">' + e(x.razon) + '</td>' + x.dias.map(d => celda(d, 'b', maxRaz)).join('') +
+      '<td class="r tt"><b>' + m(x.tot) + '</b></td></tr>').join('') + '</tbody></table>';
+
+  const hoja2 =
+    '<section class="hoja">' + encabezado(2, 2) +
+    '<h2>Caja — últimos 7 días <small>más oscuro = más monto · en verde ingresos, en azul egresos</small></h2>' +
+    tablaSemana + tablaRazSem +
+    '<p class="mini"><b>Ingresos</b>: favorito inglb (clientes). <b>Egresos</b>: favorito Gastoslb (proveedores). ' +
+    'Los montos de ingresos y egresos son pagos publicados en el día (hora de Venezuela), igual que el panel.</p>' +
+    pie + '</section>';
+
+  const css =
+    '@page{size:A4 landscape;margin:10mm 12mm}*{box-sizing:border-box}' +
+    'body{font-family:Helvetica,Arial,sans-serif;color:#1f2937;margin:0;font-size:11px;' +
+    '-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+    '.hoja{page-break-after:always;padding:4px 2px}.hoja:last-child{page-break-after:auto}' +
+    '.hd{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #17375e;' +
+    'padding-bottom:6px;margin-bottom:10px}' +
+    '.hd h1{margin:0;font-size:22px;color:#17375e}.fecha{font-size:14px;color:#1f2937;margin-top:2px}' +
+    '.hdr{text-align:right}.sello{display:inline-block;border:1.5px solid #17375e;color:#17375e;border-radius:5px;' +
+    'padding:3px 9px;font-weight:700;font-size:10.5px;letter-spacing:.6px;margin-bottom:5px}' +
+    '.gen{color:#6b7280;font-size:10.5px}' +
+    '.kp{display:flex;gap:7px;margin-bottom:9px}.k{flex:1;border:1px solid #c9d3e3;border-radius:6px;padding:6px 9px}' +
+    '.k span{display:block;color:#4b5563;font-size:10px}.k b{font-size:16px;color:#17375e}' +
+    '.k.pos b{color:#15803d}.k.neg b{color:#b91c1c}' +
+    '.rev{background:#fdecec;border:1px solid #f5c2c2;border-radius:6px;padding:7px 12px;margin-bottom:10px}' +
+    '.revt{color:#b91c1c;font-weight:700;margin-bottom:3px}.rev ul{margin:0;padding-left:0;list-style:none;columns:2}' +
+    '.rev li{margin:2px 0}.rev li:before{content:"• "}' +
+    'h2{font-size:13.5px;color:#17375e;margin:12px 0 4px}h2 small{font-size:10.5px;color:#6b7280;font-weight:400;margin-left:6px}' +
+    'table.t{width:100%;border-collapse:collapse}.t th{background:#eef2f8;color:#374151;font-size:10px;font-weight:700;' +
+    'padding:5px 7px;text-align:left;border-bottom:1px solid #c9d3e3}.t td{padding:5px 7px;border-bottom:1px solid #e5e9f0}' +
+    '.t tr.grp th{color:#fff;text-align:center;font-size:10.5px;border:0}.ga{background:#2d5d9f!important}' +
+    '.gb{background:#23955a!important}.gc{background:#e07b24!important}' +
+    '.g1{border-left:2px solid #c9d3e3}.r{text-align:right;white-space:nowrap}.n{white-space:nowrap}' +
+    '.c{color:#374151}.z{color:#c3cad6}.rojo{color:#b91c1c}.verde{color:#15803d}' +
+    '.t tr.tot td{font-weight:700;background:#eef2f8;border-top:1.5px solid #17375e}' +
+    '.t tr.fuerte td.n{font-weight:700}.tt{border-left:2px solid #c9d3e3}.t th.hoy{color:#17375e;text-decoration:underline}' +
+    '.t th.r{text-align:right}.sem td.r,.sem th.r{text-align:center}.sem td.n{text-align:left}.sem td{padding:3px 6px}' +
+    '.bar{height:9px;background:#eef2f8;border-radius:2px}.bar i{display:block;height:100%;background:#2d5d9f;border-radius:2px}' +
+    '.mini{color:#6b7280;font-size:10px;margin:5px 0 0}' +
+    '.pie{display:flex;justify-content:space-between;color:#9ca3af;font-size:9.5px;border-top:1px solid #e5e9f0;' +
+    'padding-top:5px;margin-top:10px}' +
+    '.noprint{text-align:right;margin:8px}@media print{.noprint{display:none}}' +
+    '.noprint button{background:#17375e;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-weight:700;cursor:pointer}';
 
   const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">' +
-  '<title>Reporte diario ' + fechaTxt + '</title><style>' +
-  '@page{size:A4;margin:14mm}*{box-sizing:border-box}' +
-  'body{font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;margin:0;font-size:12px}' +
-  '.head{background:#213C83;color:#fff;padding:14px 18px;border-radius:8px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
-  '.head h1{margin:0;font-size:19px}.head p{margin:3px 0 0;color:#cbd5e8;font-size:11px}' +
-  'h2{color:#213C83;font-size:14px;margin:18px 0 6px;border-bottom:2px solid #d7deee;padding-bottom:3px}' +
-  '.kp{display:flex;gap:8px;flex-wrap:wrap}.k{flex:1;min-width:120px;border:1px solid #d7deee;border-radius:8px;padding:8px 10px}' +
-  '.k span{font-size:10px;color:#666;display:block}.k b{font-size:16px}.k small{display:block;color:#999;font-size:10px}' +
-  '.k.neg b{color:#a4262c}.k.pos b{color:#047857}' +
-  'table{width:100%;border-collapse:collapse;margin-top:4px}th{background:#f0f3fa;color:#213C83;text-align:left;' +
-  'font-size:10px;text-transform:uppercase;padding:5px 7px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
-  'td{padding:4px 7px;border-bottom:1px solid #eef1f8}.r{text-align:right;white-space:nowrap}' +
-  'tr.tot td{font-weight:700;border-top:2px solid #213C83}tr{page-break-inside:avoid}' +
-  '.ctls{display:flex;gap:10px}.ctl{flex:1;border:1px solid #d7deee;border-radius:8px;padding:8px 10px}' +
-  '.ctl h4{margin:0 0 4px;font-size:11px;color:#666;text-transform:uppercase}.big{font-size:17px;font-weight:700;color:#213C83;margin-bottom:4px}' +
-  '.pill{display:inline-block;border-radius:10px;padding:1px 8px;font-size:10.5px;font-weight:700;margin:2px 2px 0 0;' +
-  '-webkit-print-color-adjust:exact;print-color-adjust:exact}.pill.ok{background:#d1fae5;color:#065f46}.pill.pend{background:#fef3c7;color:#92400e}' +
-  'table.mini{margin-top:6px}table.mini th{font-size:9px;padding:3px 6px}table.mini td{padding:3px 6px}' +
-  'tr.tot0 td{border-bottom:1px solid #213C83}tr.sub0 td{color:#666;font-size:11px}' +
-  'tr.esp td{color:#92400e;font-weight:700}' +
-  '.nota{color:#8892a8;font-size:10px;margin-top:16px}.vacio{color:#999;padding:6px 0}' +
-  '.bar{height:5px;background:#eef1f8;border-radius:3px}.bar i{display:block;height:100%;background:#213C83;border-radius:3px;' +
-  '-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
-  '.noprint{margin:10px 0;text-align:right}@media print{.noprint{display:none}}' +
-  '.noprint button{background:#213C83;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-weight:700;cursor:pointer}' +
-  '</style></head><body>' +
-  '<div class="noprint"><button onclick="window.print()">Guardar como PDF / Imprimir</button></div>' +
-  '<div class="head"><h1>Reporte diario de caja — ' + fechaTxt + '</h1>' +
-  '<p>' + (R.comp ? e(R.comp) + ' · ' : 'Todas las compañías · ') + 'Montos en ' + e(R.cur) +
-  ' (moneda de compañía) · Solo pagos publicados · Datos del panel generado ' + e(M.generated) + '</p></div>' +
-
-  '<h2>Resumen del día</h2><div class="kp">' +
-  '<div class="k"><span>Ingresos por ventas</span><b>' + m(R.ing.ventas) + '</b><small>' + R.ing.nV + ' pagos</small></div>' +
-  '<div class="k"><span>Anticipos de clientes</span><b>' + m(R.ing.anticipos) + '</b><small>' + R.ing.nA + ' pagos</small></div>' +
-  (R.ing.otros ? '<div class="k"><span>Otros ingresos</span><b>' + m(R.ing.otros) + '</b><small>' + R.ing.nO + ' pagos</small></div>' : '') +
-  '<div class="k"><span>Descuentos y devoluciones</span><b>-' + m(R.ing.desc) + '</b><small>' + R.ing.nD + ' pagos</small></div>' +
-  '<div class="k pos"><span>Ingreso neto</span><b>' + m(R.ing.neto) + '</b><small>ventas + anticipos - descuentos</small></div>' +
-  '<div class="k neg"><span>Egresos</span><b>' + m(R.egTotal) + '</b><small>' + R.egRows.length + ' pagos publicados</small></div>' +
-  '<div class="k ' + (balance >= 0 ? 'pos' : 'neg') + '"><span>Balance del día</span><b>' + m(balance) +
-  '</b><small>' + (balance >= 0 ? 'Superávit' : 'Déficit') + '</small></div></div>' +
-
-  '<h2>Pagado vs. publicado</h2><div class="ctls">' +
-  ctlBox('Egresos (pagos a proveedores)', R.ctlEg) + ctlBox('Ingresos (cobros a clientes)', R.ctlIng) + '</div>' +
-
-  (R.porRazon.length
-    ? '<h2>¿En qué se fueron los egresos?</h2><table><thead><tr><th>Razón de pago</th><th class="r">Pagos</th><th class="r">Monto</th><th class="r">%</th>' +
-      '<th style="width:22%"></th></tr></thead><tbody>' +
-      R.porRazon.map(g => '<tr><td>' + e(g.razon) + '</td><td class="r">' + g.n + '</td><td class="r">' +
-        m(g.monto) + '</td><td class="r">' + p(g.monto, R.egTotal) + '</td><td><div class="bar"><i style="width:' +
-        (R.egTotal ? g.monto / R.egTotal * 100 : 0).toFixed(1) + '%"></i></div></td></tr>').join('') +
-      '<tr class="tot"><td>Total egresos</td><td class="r">' + R.egRows.length + '</td><td class="r">' +
-      m(R.egTotal) + '</td><td class="r">100.0%</td><td></td></tr></tbody></table>'
-    : '') +
-
-  '</body></html>';
+    '<title>cierre_caja_' + R.dia + '</title><style>' + css + '</style></head><body>' +
+    '<div class="noprint"><button onclick="window.print()">Guardar como PDF / Imprimir</button></div>' +
+    hoja1 + hoja2 + '</body></html>';
 
   const w = window.open('', '_blank');
   if (!w) { alert('El navegador bloqueó la ventana del reporte. Permite ventanas emergentes para este sitio.'); return; }
