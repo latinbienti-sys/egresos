@@ -1607,34 +1607,29 @@ function resumenDia(dia) {
     const g = porRazon.get(r.reason); g.monto += v(r); g.n++;
   });
 
-  // Control de publicacion: pagos con FECHA DEL PAGO en el dia (los que se
-  // hicieron ese dia) y cuantos de ellos ya estan publicados. Un pago hecho hoy
-  // puede publicarse otro dia, por eso no se mide con la fecha de publicacion.
+  // Control simple por lado:
+  //   Pagado hoy    = pagos con fecha de pago del dia (sin cancelados/rechazados).
+  //   Publicado hoy = pagos publicados con fecha de publicacion del dia; se
+  //                   anotan las fechas de pago a las que corresponden.
+  //   En espera     = pagos con fecha de pago del dia aun sin publicar.
   const control = lado => {
-    const set = delDia.filter(r => (lado === 'eg' ? r.isSupplier : r.isCustomer) &&
-                                   (r.date || '').slice(0, 10) === dia);
-    const est = {};
-    // Pagado = todo lo hecho ese dia salvo cancelados/rechazados.
-    // Publicado = estado publicado (con el dia en que se publico).
-    // En espera = borrador o en aprobacion.
-    const b = { pag: [0, 0], pub: [0, 0], esp: [0, 0], anu: [0, 0] };
-    const diasPub = {};
-    set.forEach(r => {
-      est[r.state] = (est[r.state] || 0) + 1;
+    const deLado = r => lado === 'eg' ? r.isSupplier : r.isCustomer;
+    const b = { pag: [0, 0], pub: [0, 0], esp: [0, 0] };
+    const fechasPago = {};
+    delDia.forEach(r => {
+      if (!deLado(r)) return;
       const x = v(r);
-      const anulado = r.state === 'cancel' || r.state === 'rejected';
-      if (anulado) { b.anu[0]++; b.anu[1] += x; return; }
-      b.pag[0]++; b.pag[1] += x;
-      if (r.state === 'posted') {
+      const fp = (r.date || '').slice(0, 10);
+      if (fp === dia && r.state !== 'cancel' && r.state !== 'rejected') {
+        b.pag[0]++; b.pag[1] += x;
+        if (r.state !== 'posted') { b.esp[0]++; b.esp[1] += x; }
+      }
+      if (r.state === 'posted' && pubLocalDay(r) === dia) {
         b.pub[0]++; b.pub[1] += x;
-        const dp = pubLocalDay(r) || '(sin fecha)';
-        if (!diasPub[dp]) diasPub[dp] = [0, 0];
-        diasPub[dp][0]++; diasPub[dp][1] += x;
-      } else { b.esp[0]++; b.esp[1] += x; }
+        if (fp) fechasPago[fp] = true;
+      }
     });
-    const pendientes = set.filter(r => r.state !== 'posted');
-    return { total: set.length, publicados: est.posted || 0, est: est, pendientes: pendientes,
-             b: b, diasPub: diasPub };
+    return { b: b, fechasPago: Object.keys(fechasPago).sort() };
   };
 
   return { dia: dia, comp: comp, cur: coCur, ing: ing, egRows: egRows, egTotal: egTotal,
@@ -1651,34 +1646,36 @@ function reporteDia() {
   const p = (a, b) => b ? (a / b * 100).toFixed(1) + '%' : '0.0%';
   const balance = R.ing.neto - R.egTotal;
 
-  const estados = ctl => Object.keys(ctl.est).sort().map(s =>
-    '<span class="pill ' + (s === 'posted' ? 'ok' : 'pend') + '">' + e(estadoNombre(s)) + ': ' +
-    ctl.est[s] + '</span>').join(' ');
-  const fd = s => s.length === 10 ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice(0, 4) : s;
+  const MESES_LARGO = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto',
+                       'septiembre','octubre','noviembre','diciembre'];
+  // ["2026-11-03","2026-11-04"] -> "03 y 04 de noviembre"
+  const listaFechas = fechas => {
+    const porMes = [];
+    fechas.forEach(f => {
+      const k = f.slice(0, 7);
+      let g = porMes.find(x => x.k === k);
+      if (!g) { g = { k: k, dias: [] }; porMes.push(g); }
+      g.dias.push(f.slice(8, 10));
+    });
+    const y = arr => arr.length > 1 ? arr.slice(0, -1).join(', ') + ' y ' + arr[arr.length - 1] : arr[0];
+    return y(porMes.map(g => y(g.dias) + ' de ' + MESES_LARGO[Number(g.k.slice(5, 7)) - 1]));
+  };
   const fila = (txt, par, cls) =>
     '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td>' + txt + '</td><td class="r">' + par[0] +
     '</td><td class="r">' + m(par[1]) + '</td></tr>';
   const ctlBox = (titulo, ctl) => {
-    if (!ctl.total) return '<div class="ctl"><h4>' + titulo + '</h4><p class="vacio">Sin pagos con fecha de este día.</p></div>';
-    const dias = Object.keys(ctl.diasPub).sort();
+    const otras = ctl.fechasPago.filter(f => f !== R.dia);
+    const coletilla = !otras.length ? ''
+      : '<tr class="sub0"><td colspan="3">' +
+        (ctl.fechasPago.indexOf(R.dia) !== -1 ? 'Incluye pagos del ' : 'Corresponde a pagos del ') +
+        listaFechas(otras) + '</td></tr>';
     return '<div class="ctl"><h4>' + titulo + '</h4>' +
-      '<div class="big">' + ctl.b.pub[0] + ' de ' + ctl.b.pag[0] + ' publicados</div>' +
-      '<div>' + estados(ctl) + '</div>' +
       '<table class="mini"><thead><tr><th></th><th class="r">Pagos</th><th class="r">Monto</th></tr></thead><tbody>' +
-      fila('<b>Pagado</b>', ctl.b.pag, 'tot0') +
-      fila('<b>Publicado</b>', ctl.b.pub) +
-      dias.map(d => fila('&nbsp;&nbsp;&nbsp;publicado el ' + fd(d) + (d === R.dia ? ' (mismo día)' : ''),
-                         ctl.diasPub[d], 'sub0')).join('') +
-      fila('<b>En espera</b> (borrador / en aprobación)', ctl.b.esp, ctl.b.esp[0] ? 'esp' : '') +
-      (ctl.b.anu[0] ? fila('Cancelado / rechazado (no suma)', ctl.b.anu, 'sub0') : '') +
+      fila('<b>Pagado hoy</b>', ctl.b.pag) +
+      fila('<b>Publicado hoy</b>', ctl.b.pub) + coletilla +
+      fila('<b>En espera</b> (pagado hoy, sin publicar)', ctl.b.esp, ctl.b.esp[0] ? 'esp' : '') +
       '</tbody></table></div>';
   };
-  const pendTabla = list => !list.length ? '' :
-    '<table><thead><tr><th>Documento</th><th>Tipo</th><th>Socio</th><th>Razón</th><th>Estado</th>' +
-    '<th class="r">Monto</th></tr></thead><tbody>' +
-    list.map(r => '<tr><td>' + e(r.doc) + '</td><td>' + (r.isSupplier ? 'Egreso' : 'Ingreso') +
-      '</td><td>' + e(r.partner) + '</td><td>' + e(r.reason) + '</td><td>' + e(estadoNombre(r.state)) +
-      '</td><td class="r">' + m(R.v(r)) + '</td></tr>').join('') + '</tbody></table>';
 
   const html = '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">' +
   '<title>Reporte diario ' + fechaTxt + '</title><style>' +
@@ -1722,12 +1719,8 @@ function reporteDia() {
   '<div class="k ' + (balance >= 0 ? 'pos' : 'neg') + '"><span>Balance del día</span><b>' + m(balance) +
   '</b><small>' + (balance >= 0 ? 'Superávit' : 'Déficit') + '</small></div></div>' +
 
-  '<h2>Pagos hechos el día vs. publicados</h2><div class="ctls">' +
+  '<h2>Pagado vs. publicado</h2><div class="ctls">' +
   ctlBox('Egresos (pagos a proveedores)', R.ctlEg) + ctlBox('Ingresos (cobros a clientes)', R.ctlIng) + '</div>' +
-  (R.ctlEg.pendientes.length || R.ctlIng.pendientes.length
-    ? '<p style="margin:8px 0 0;font-weight:700;color:#92400e">Pagos del día sin publicar</p>' +
-      pendTabla(R.ctlEg.pendientes.concat(R.ctlIng.pendientes))
-    : '<p class="vacio">Todos los pagos del día están publicados.</p>') +
 
   (R.porRazon.length
     ? '<h2>¿En qué se fueron los egresos?</h2><table><thead><tr><th>Razón de pago</th><th class="r">Pagos</th><th class="r">Monto</th><th class="r">%</th>' +
@@ -1739,13 +1732,6 @@ function reporteDia() {
       m(R.egTotal) + '</td><td class="r">100.0%</td><td></td></tr></tbody></table>'
     : '') +
 
-  (R.egRows.length
-    ? '<h2>Detalle de egresos publicados</h2><table><thead><tr><th>Documento</th><th>Proveedor</th>' +
-      '<th>Razón</th><th class="r">Monto</th></tr></thead><tbody>' +
-      R.egRows.map(r => '<tr><td>' + e(r.doc) + '</td><td>' + e(r.partner) + '</td><td>' + e(r.reason) +
-        '</td><td class="r">' + m(R.v(r)) + '</td></tr>').join('') +
-      '<tr class="tot"><td colspan="3">Total</td><td class="r">' + m(R.egTotal) + '</td></tr></tbody></table>'
-    : '') +
   '</body></html>';
 
   const w = window.open('', '_blank');
