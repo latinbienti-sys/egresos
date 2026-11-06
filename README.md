@@ -115,3 +115,11 @@ node test_sync_incremental.js
 179 pruebas (90 de agregación, filtros, histórico año-mes, drill-down de 3 niveles y escapes;
 71 de la base de ingresos de clientes contra los datos reales, incluido el cruce de
 los totales de Ambos con Salidas y Entradas y el día final del rango; 18 de la descarga incremental). No conectan a Odoo.
+
+## Cierre de caja automático (PDF + correo)
+
+Todos los días a las **20:30 (hora Venezuela)** la Action genera el mismo *Reporte del día (PDF)* del botón del panel, lo guarda en `gh-pages` como `cierres/caja_AAAA-MM-DD.pdf` (foto fija: el horario programado no lo repite) y lo envía por correo a presidencia@, vicepresidencia@ y yarley@latinbien.com.
+
+- Lo hace `cierre_caja.js`: abre `gastos_razon_pagos.html?reporte=AAAA-MM-DD` con Chrome sin ventana y lo imprime a PDF. No consulta Odoo.
+- Correo: secretos `LATINBIEN_SMTP_USER` y `LATINBIEN_SMTP_PASS` (la misma cuenta del cierre de embudoventas).
+- A mano: *Actions → Actualizar Dashboard → Run workflow*, marcar **cierre** (y opcionalmente **para** con un correo de prueba). La corrida manual rehace el PDF del día.

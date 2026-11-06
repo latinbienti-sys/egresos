@@ -1684,8 +1684,9 @@ function listaFechas(fechas) {
   return y(porMes.map(g => y(g.dias) + ' de ' + MESES_LARGO[Number(g.k.slice(5, 7)) - 1]));
 }
 
-function reporteDia() {
-  const R = resumenDia(diaReporte());
+// Arma el HTML del cierre de un dia (lo usa el boton y el PDF automatico).
+function htmlReporteDia(dia) {
+  const R = resumenDia(dia);
   const m = x => fmt(x, R.cur);
   const e = escapeHtml;
   const fechaTxt = diaSemana(R.dia) + ' ' + ddmm(R.dia) + '/' + R.dia.slice(0, 4);
@@ -1729,7 +1730,7 @@ function reporteDia() {
     (R.comp ? e(R.comp) + ' · ' : '') + 'Montos en ' + e(R.cur) + ' · Hoja ' + hoja + ' de ' + total +
     '</div></div></div>';
   const pie = '<div class="pie"><span>Latinbien · Caja y egresos</span>' +
-    '<span>Consulta de solo lectura a Odoo · latinbienti-sys.github.io/egresos/gastos_razon_pagos.html</span></div>';
+    '<span>Consulta de solo lectura a Odoo</span></div>';
 
   // --- Hoja 1: resumen, pagado vs publicado y egresos por razon -----------
   const filaCtl = (nombre, ctl, cls) =>
@@ -1912,7 +1913,11 @@ function reporteDia() {
     '<title>cierre_caja_' + R.dia + '</title><style>' + css + '</style></head><body>' +
     '<div class="noprint"><button onclick="window.print()">Guardar como PDF / Imprimir</button></div>' +
     hoja1 + hoja2 + '</body></html>';
+  return html;
+}
 
+function reporteDia() {
+  const html = htmlReporteDia(diaReporte());
   const w = window.open('', '_blank');
   if (!w) { alert('El navegador bloqueó la ventana del reporte. Permite ventanas emergentes para este sitio.'); return; }
   w.document.open();
@@ -1989,6 +1994,15 @@ document.getElementById('fNoDate').addEventListener('change', rerender);
   syncBaseWithPtype();
   render();
   refreshDateWarn();
+
+  // ?reporte=AAAA-MM-DD: la pagina se reemplaza por el cierre de ese dia, para
+  // imprimirlo a PDF sin ventana (cierre_caja.js en GitHub Actions).
+  const qs = typeof location !== 'undefined' ? location.search : '';
+  const diaPdf = (qs.match(/[?&]reporte=(\d{4}-\d{2}-\d{2})/) || [])[1];
+  if (diaPdf) {
+    const html = htmlReporteDia(diaPdf);
+    setTimeout(function () { document.open(); document.write(html); document.close(); }, 0);
+  }
 })();
 </script>
 </body>

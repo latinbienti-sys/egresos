@@ -2,16 +2,28 @@ name: Actualizar Dashboard
 
 # Regenera el panel de solo lectura con los movimientos de Odoo y lo publica
 # en la rama gh-pages (GitHub Pages).
+# A las 20:30 (Venezuela) ademas genera el PDF del cierre de caja del dia
+# (cierres/caja_AAAA-MM-DD.pdf en gh-pages) y lo envia por correo.
 on:
   schedule:
     # Cada hora, al minuto 7 para no coincidir con el pico de las 00:00.
     - cron: '7 * * * *'
+    # 20:30 Venezuela (UTC-4): cierre de caja + correo.
+    - cron: '30 0 * * *'
   workflow_dispatch:
     inputs:
       limite:
         description: 'Maximo de registros a descargar'
         required: false
         default: '200000'
+      cierre:
+        description: 'Generar el PDF del cierre de caja de hoy y enviar el correo'
+        type: boolean
+        default: false
+      para:
+        description: 'Opcional: enviar el correo solo a esta(s) direccion(es), separadas por coma'
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -24,9 +36,28 @@ concurrency:
 jobs:
   generar:
     runs-on: ubuntu-latest
+    env:
+      HAY_CORREO: ${{ secrets.LATINBIEN_SMTP_PASS != '' }}
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
+
+      - name: Modo (actualizacion o cierre de caja)
+        id: modo
+        run: |
+          DIA=$(TZ=America/Caracas date +%F)
+          CIERRE=false
+          if [ "${{ github.event.schedule }}" = "30 0 * * *" ]; then
+            # GitHub a veces demora el horario de las 20:30: si arranca despues de
+            # medianoche, el cierre es del dia anterior (hasta las 04:30 de Venezuela).
+            DIA=$(TZ=America/Caracas date -d '-8 hours' +%F)
+            CIERRE=true
+          elif [ "${{ inputs.cierre }}" = "true" ]; then
+            CIERRE=true
+          fi
+          echo "dia=$DIA" >> "$GITHUB_OUTPUT"
+          echo "cierre=$CIERRE" >> "$GITHUB_OUTPUT"
+          echo "dia: $DIA | cierre de caja: $CIERRE"
 
       # Base incremental: el panel ya publicado. Con el solo marco Odoo de
       # "lo que cambio desde la ultima corrida", en vez de bajar los ~36k
@@ -85,7 +116,20 @@ jobs:
           node test_ingresos_clientes.js
           node test_sync_incremental.js
 
+      # Mismo "Reporte del dia (PDF)" del boton del panel, impreso sin ventana.
+      - name: Generar el PDF del cierre de caja
+        if: steps.modo.outputs.cierre == 'true'
+        run: |
+          node cierre_caja.js --dia "${{ steps.modo.outputs.dia }}" --html gastos_razon_pagos.html --pdf "$RUNNER_TEMP/caja_${{ steps.modo.outputs.dia }}.pdf"
+          # Al publicar se cambia a gh-pages (donde no esta el script): se aparta para el correo.
+          cp cierre_caja.js "$RUNNER_TEMP/"
+
       - name: Publicar en gh-pages
+        id: publicar
+        env:
+          DIA: ${{ steps.modo.outputs.dia }}
+          CIERRE: ${{ steps.modo.outputs.cierre }}
+          PROGRAMADO: ${{ github.event_name == 'schedule' }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -99,11 +143,44 @@ jobs:
           git checkout -B gh-pages origin/gh-pages
           git reset --hard origin/gh-pages
           cp "$RUNNER_TEMP/panel.html" gastos_razon_pagos.html
-          if git diff --quiet -- gastos_razon_pagos.html; then
+          git add gastos_razon_pagos.html
+          # PDF del cierre: foto fija. El horario programado no repite un cierre que
+          # ya existe (por ejemplo hecho a mano); la corrida manual lo rehace.
+          ENVIAR=false
+          PDF="cierres/caja_${DIA}.pdf"
+          if [ "$CIERRE" = "true" ]; then
+            if [ "$PROGRAMADO" = "true" ] && [ -f "$PDF" ]; then
+              echo "el cierre de $DIA ya existe: no se repite el PDF ni el correo"
+            else
+              mkdir -p cierres
+              cp "$RUNNER_TEMP/caja_${DIA}.pdf" "$PDF"
+              git add "$PDF"
+              ENVIAR=true
+            fi
+          fi
+          echo "enviar=$ENVIAR" >> "$GITHUB_OUTPUT"
+          if git diff --cached --quiet; then
             echo "sin cambios: el panel ya estaba actualizado"
           else
-            git add gastos_razon_pagos.html
-            git commit -m "Panel actualizado $(date -u '+%Y-%m-%d %H:%M UTC')"
+            if [ "$ENVIAR" = "true" ]; then MSG="Cierre de caja $DIA"; else MSG="Panel actualizado $(date -u '+%Y-%m-%d %H:%M UTC')"; fi
+            git commit -m "$MSG"
             git push origin gh-pages
             echo "panel publicado"
           fi
+
+      - name: Enviar correo del cierre de caja
+        if: steps.publicar.outputs.enviar == 'true' && env.HAY_CORREO == 'true'
+        env:
+          LATINBIEN_SMTP_USER: ${{ secrets.LATINBIEN_SMTP_USER }}
+          LATINBIEN_SMTP_PASS: ${{ secrets.LATINBIEN_SMTP_PASS }}
+          # Destinatarios: los de la corrida manual (campo "para") o los fijos del cierre.
+          MAIL_TO: ${{ inputs.para != '' && inputs.para || 'presidencia@latinbien.com,vicepresidencia@latinbien.com,yarley@latinbien.com' }}
+        run: |
+          cd "$RUNNER_TEMP"
+          npm install --no-save --no-package-lock nodemailer@6 >/dev/null
+          node cierre_caja.js --dia "${{ steps.modo.outputs.dia }}" --pdf "$RUNNER_TEMP/caja_${{ steps.modo.outputs.dia }}.pdf" --enviar
+
+      - name: Aviso si falta la cuenta de correo
+        if: steps.publicar.outputs.enviar == 'true' && env.HAY_CORREO != 'true'
+        run: |
+          echo "::warning::PDF del cierre publicado, pero no se envio el correo: faltan los secretos LATINBIEN_SMTP_USER / LATINBIEN_SMTP_PASS en este repositorio."
